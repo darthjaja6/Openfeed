@@ -114,7 +114,11 @@ The Quickstart uses `examples/web` and shows cards on localhost. To push to
 Ticlawk instead, start from `examples/ticlawk`, set your Ticlawk publisher key
 in `.env.local`, and replace the example channel id in `openfeed.yaml`. Ticlawk
 is useful when you want the feed in a hosted app instead of only on your local
-machine. The same consumer contract is described in
+machine. Run `./run-openfeed smoke` from that example before starting the full
+producer; it publishes one minimal HTML card to verify the Ticlawk API key and
+per-topic `consumer_config.channel_id` without using OpenRouter, OpenCLI,
+Browser Bridge, source discovery, or media preparation. The same consumer
+contract is described in
 [Custom feed clients](docs/custom-producer.md).
 
 ## Advanced

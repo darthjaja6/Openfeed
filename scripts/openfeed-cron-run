@@ -65,13 +65,10 @@ esac
   echo
   echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) openfeed $1 ===="
 
-  if ! flock -n 9; then
-    echo "previous $1 run still active; skipping"
-    exit 0
-  fi
-
-  "${cmd[@]}"
+  set +e
+  "$VENV/bin/python" -m openfeed.utils.run_with_lock "$lock" "$1" -- "${cmd[@]}"
   rc=$?
+  set -e
   echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) openfeed $1 done rc=$rc ===="
   exit "$rc"
-} 9>"$lock" >> "$log" 2>&1
+} >> "$log" 2>&1
