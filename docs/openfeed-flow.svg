@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="420" viewBox="0 0 980 420" role="img" aria-labelledby="title desc">
+  <title id="title">openfeed pipeline</title>
+  <desc id="desc">Configuration flows into supply tasks, queue, consumer push, feedback, and learning.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#455a64"/>
+    </marker>
+    <style>
+      .label { font: 600 17px Arial, sans-serif; fill: #172026; }
+      .small { font: 13px Arial, sans-serif; fill: #455a64; }
+      .band { fill: #f8fafc; stroke: #d8dee4; stroke-width: 1.2; rx: 8; }
+      .box { stroke-width: 1.5; rx: 8; }
+      .supply { fill: #e8f4ff; stroke: #2f80ed; }
+      .state { fill: #fff7e6; stroke: #d18b00; }
+      .consumer { fill: #eaf8ef; stroke: #219653; }
+      .learn { fill: #f3ecff; stroke: #7b61ff; }
+      .line { fill: none; stroke: #455a64; stroke-width: 1.8; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect x="20" y="24" width="940" height="112" class="band"/>
+  <rect x="20" y="154" width="940" height="112" class="band"/>
+  <rect x="20" y="284" width="940" height="96" class="band"/>
+
+  <text x="38" y="52" class="small">Configure</text>
+  <text x="38" y="182" class="small">Supply side</text>
+  <text x="38" y="312" class="small">Consumer side</text>
+
+  <rect x="70" y="66" width="150" height="54" class="box state"/>
+  <text x="82" y="91" class="label">openfeed.yaml</text>
+  <text x="92" y="109" class="small">persona, topics</text>
+
+  <rect x="290" y="66" width="150" height="54" class="box state"/>
+  <text x="317" y="91" class="label">runtime</text>
+  <text x="322" y="109" class="small">limits, cadence</text>
+
+  <rect x="510" y="66" width="150" height="54" class="box state"/>
+  <text x="544" y="91" class="label">.env.local</text>
+  <text x="544" y="109" class="small">API keys</text>
+
+  <rect x="70" y="196" width="128" height="54" class="box supply"/>
+  <text x="95" y="221" class="label">reconcile</text>
+  <text x="96" y="239" class="small">topic changes</text>
+
+  <rect x="238" y="196" width="128" height="54" class="box supply"/>
+  <text x="265" y="221" class="label">discover</text>
+  <text x="262" y="239" class="small">find sources</text>
+
+  <rect x="406" y="196" width="128" height="54" class="box supply"/>
+  <text x="448" y="221" class="label">patrol</text>
+  <text x="433" y="239" class="small">fetch content</text>
+
+  <rect x="574" y="196" width="128" height="54" class="box supply"/>
+  <text x="617" y="221" class="label">filter</text>
+  <text x="604" y="239" class="small">review fit</text>
+
+  <rect x="742" y="196" width="128" height="54" class="box state"/>
+  <text x="783" y="221" class="label">queue</text>
+  <text x="769" y="239" class="small">per topic</text>
+
+  <rect x="238" y="326" width="128" height="54" class="box consumer"/>
+  <text x="254" y="351" class="label">prepare video</text>
+  <text x="271" y="369" class="small">local mp4</text>
+
+  <rect x="438" y="326" width="128" height="54" class="box consumer"/>
+  <text x="480" y="351" class="label">push</text>
+  <text x="461" y="369" class="small">send cards</text>
+
+  <rect x="638" y="326" width="128" height="54" class="box consumer"/>
+  <text x="671" y="351" class="label">feedback</text>
+  <text x="667" y="369" class="small">read signals</text>
+
+  <rect x="810" y="326" width="104" height="54" class="box learn"/>
+  <text x="840" y="351" class="label">learn</text>
+  <text x="828" y="369" class="small">tune pool</text>
+
+  <path d="M 220 93 L 290 93" class="line"/>
+  <path d="M 440 93 L 510 93" class="line"/>
+  <path d="M 585 120 L 134 196" class="line"/>
+  <path d="M 145 120 L 134 196" class="line"/>
+  <path d="M 198 223 L 238 223" class="line"/>
+  <path d="M 366 223 L 406 223" class="line"/>
+  <path d="M 534 223 L 574 223" class="line"/>
+  <path d="M 702 223 L 742 223" class="line"/>
+  <path d="M 806 250 L 502 326" class="line"/>
+  <path d="M 806 250 L 302 326" class="line"/>
+  <path d="M 366 353 L 438 353" class="line"/>
+  <path d="M 566 353 L 638 353" class="line"/>
+  <path d="M 766 353 L 810 353" class="line"/>
+  <path d="M 862 326 C 862 280 312 280 312 250" class="line"/>
+
+  <text x="790" y="302" class="small">feedback improves sources/search</text>
+  <text x="724" y="180" class="small">durable state</text>
+</svg>

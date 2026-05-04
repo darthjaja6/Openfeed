@@ -1,0 +1,52 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Runtime data (large, regenerated; contains inferred personal info)
+data/
+output/
+logs/
+state/
+ledgers/
+queues/
+
+# Ticlawk local state
+.ticlawk/
+
+# Claude Code local state
+.claude/
+
+# Codex
+.codex/
+
+# Local secrets
+.env*
+!.env.example
+!examples/web/.env.local.example
+!examples/ticlawk/.env.local.example
+
+# Personal config (template lives at config/openfeed.yaml.example)
+openfeed.yaml
+!examples/web/openfeed.yaml
+!examples/ticlawk/openfeed.yaml
+!examples/web/local-quickstart/openfeed.yaml
+
+# Working scratchpad (one-shot scripts, manual probes, dump files)
+tmp/
+
+# Output of test runs / scratch downloads
+/tmp_*
+
+# Local archives / filesystem metadata
+*.tar.gz
+._*
+uv.lock
+
+# OS
+.DS_Store
+
+# Agent files (private notes for codex / Claude Code; not part of public repo)
+/AGENTS.md
+/CLAUDE.md

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTANCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CODE_ROOT="$(cd "$INSTANCE_ROOT/../../.." && pwd)"
+OUTPUT_DIR="${OPENFEED_WORKDIR:-$INSTANCE_ROOT/output}"
+HOST="${OPENFEED_LOCAL_HOST:-127.0.0.1}"
+PORT="${OPENFEED_LOCAL_PORT:-8765}"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || command -v python)}"
+
+mkdir -p "$OUTPUT_DIR"
+
+export OPENFEED_CONFIG_FILE="$INSTANCE_ROOT/openfeed.yaml"
+export OPENFEED_WORKDIR="$OUTPUT_DIR"
+export PYTHONPATH="$CODE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+"$PYTHON_BIN" "$INSTANCE_ROOT/seed_queue.py" "$OUTPUT_DIR"
+
+(
+  cd "$OUTPUT_DIR"
+  uv run --project "$CODE_ROOT" openfeed-push --max 3
+)
+
+echo "openfeed local quickstart ready: http://$HOST:$PORT/"
+exec uv run --project "$CODE_ROOT" openfeed-local-server --host "$HOST" --port "$PORT" --open

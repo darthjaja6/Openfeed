@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CODE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKDIR="${OPENFEED_WORKDIR:-$CODE_ROOT}"
+
+if [[ -n "${OPENFEED_VENV:-}" ]]; then
+  VENV="$OPENFEED_VENV"
+elif [[ -x "$WORKDIR/.venv/bin/python" ]]; then
+  VENV="$WORKDIR/.venv"
+else
+  VENV="$CODE_ROOT/.venv"
+fi
+
+cd "$WORKDIR"
+
+mkdir -p logs
+
+DEFAULT_PATH_PREFIX="${HOME}/local/bin:${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+export PATH="$VENV/bin:${OPENFEED_PATH_PREFIX:-$DEFAULT_PATH_PREFIX}:${PATH:-}"
+export PYTHONPATH="$CODE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export OPENFEED_OPENCLI_PING_TIMEOUT="${OPENFEED_OPENCLI_PING_TIMEOUT:-60}"
+export OPENCLI_BROWSER_COMMAND_TIMEOUT="${OPENCLI_BROWSER_COMMAND_TIMEOUT:-120}"
+export DISPLAY="${DISPLAY:-:10.0}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+
+usage() {
+  echo "usage: $0 supply|refill|prepare|discover" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+
+case "$1" in
+  supply)
+    lock="/tmp/openfeed-supply.lock"
+    log="logs/supply.out"
+    cmd=("$VENV/bin/openfeed-supply-cycle")
+    ;;
+  refill)
+    lock="/tmp/openfeed-refill.lock"
+    log="logs/refill.out"
+    export OPENFEED_DISABLE_PUSH="${OPENFEED_DISABLE_PUSH:-1}"
+    export OPENFEED_DISABLE_FEEDBACK="${OPENFEED_DISABLE_FEEDBACK:-1}"
+    export OPENFEED_DISABLE_LEARN="${OPENFEED_DISABLE_LEARN:-1}"
+    cmd=("$VENV/bin/openfeed-refill-cycle")
+    ;;
+  prepare)
+    lock="/tmp/openfeed-prepare-video.lock"
+    log="logs/prepare.out"
+    cmd=("$VENV/bin/openfeed-prepare-video")
+    ;;
+  discover)
+    lock="/tmp/openfeed-discover.lock"
+    log="logs/discover.out"
+    cmd=("$VENV/bin/openfeed-discover")
+    ;;
+  *)
+    usage
+    ;;
+esac
+
+{
+  echo
+  echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) openfeed $1 ===="
+
+  if ! flock -n 9; then
+    echo "previous $1 run still active; skipping"
+    exit 0
+  fi
+
+  "${cmd[@]}"
+  rc=$?
+  echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) openfeed $1 done rc=$rc ===="
+  exit "$rc"
+} 9>"$lock" >> "$log" 2>&1

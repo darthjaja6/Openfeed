@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openfeed"
+version = "0.1.0"
+description = "Personalized content feed publisher (杨金水)."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2",
+    "PyYAML>=6",
+    "Jinja2>=3",
+    "python-dotenv>=1",
+    "playwright>=1.40",
+    "feedparser>=6",
+    "tqdm>=4",
+    "trafilatura>=2",
+    "yt-dlp",
+]
+
+[project.scripts]
+openfeed = "openfeed.cli:main"
+openfeed-doctor = "openfeed.doctor:main"
+interest-bootstrap = "openfeed.core.interest_bootstrap:main"
+openfeed-discover = "openfeed.core.discover:main"
+openfeed-patrol = "openfeed.core.patrol:main"
+openfeed-filter = "openfeed.core.filter:main"
+openfeed-queue-manage = "openfeed.core.queue_manage:main"
+openfeed-prepare-video = "openfeed.core.prepare_video:main"
+openfeed-cleanup-assets = "openfeed.core.cleanup_assets:main"
+openfeed-supply-cycle = "openfeed.core.supply_cycle:main"
+openfeed-push = "openfeed.core.push:main"
+openfeed-collect-feedback = "openfeed.core.collect_feedback:main"
+openfeed-learn = "openfeed.core.learn:main"
+openfeed-refill-cycle = "openfeed.core.refill_cycle:main"
+openfeed-backpressure = "openfeed.utils.backpressure:main"
+openfeed-topic-reconcile = "openfeed.core.topic_reconcile:main"
+openfeed-local-server = "openfeed.clients.consumer.local_web:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["openfeed*"]

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_CODE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+INSTANCE_ROOT="${OPENFEED_INSTANCE_ROOT:-$PWD}"
+CODE_ROOT="${OPENFEED_CODE_ROOT:-$INSTANCE_ROOT/openfeed}"
+VENV="${OPENFEED_VENV:-$INSTANCE_ROOT/.venv}"
+
+if [[ ! -d "$CODE_ROOT" ]]; then
+  CODE_ROOT="$DEFAULT_CODE_ROOT"
+fi
+
+if [[ ! -f "$CODE_ROOT/pyproject.toml" ]]; then
+  echo "missing openfeed code root: $CODE_ROOT" >&2
+  exit 2
+fi
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+install_with_brew() {
+  local packages=("$@")
+  [[ ${#packages[@]} -gt 0 ]] || return 0
+  brew install "${packages[@]}"
+}
+
+install_with_apt() {
+  local packages=("$@")
+  [[ ${#packages[@]} -gt 0 ]] || return 0
+  sudo apt-get update
+  sudo apt-get install -y "${packages[@]}"
+}
+
+missing_packages=()
+
+if ! have uv; then
+  missing_packages+=(uv)
+fi
+if ! have ffmpeg; then
+  missing_packages+=(ffmpeg)
+fi
+if ! have node; then
+  missing_packages+=(node)
+fi
+if ! have npm; then
+  missing_packages+=(npm)
+fi
+
+if [[ ${#missing_packages[@]} -gt 0 ]]; then
+  if have brew; then
+    brew_packages=()
+    for package in "${missing_packages[@]}"; do
+      case "$package" in
+        node|npm)
+          if [[ ! " ${brew_packages[*]} " =~ " node " ]]; then
+            brew_packages+=(node)
+          fi
+          ;;
+        *)
+          brew_packages+=("$package")
+          ;;
+      esac
+    done
+    install_with_brew "${brew_packages[@]}"
+  elif have apt-get; then
+    apt_packages=()
+    for package in "${missing_packages[@]}"; do
+      case "$package" in
+        node)
+          apt_packages+=(nodejs)
+          ;;
+        *)
+          apt_packages+=("$package")
+          ;;
+      esac
+    done
+    install_with_apt "${apt_packages[@]}"
+  else
+    echo "missing dependencies: ${missing_packages[*]}" >&2
+    echo "install them with your system package manager, then rerun this script" >&2
+    exit 1
+  fi
+fi
+
+if ! have uv; then
+  echo "uv is still missing after installation" >&2
+  exit 1
+fi
+
+uv venv "$VENV"
+uv pip install --python "$VENV/bin/python" -e "$CODE_ROOT"
+
+echo "openfeed dependencies installed"
+echo "virtualenv: $VENV"

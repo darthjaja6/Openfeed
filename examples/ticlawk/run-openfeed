@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTANCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CODE_ROOT="${OPENFEED_CODE_ROOT:-$INSTANCE_ROOT/openfeed}"
+OUTPUT_DIR="${OPENFEED_OUTPUT_DIR:-$INSTANCE_ROOT/output}"
+VENV="${OPENFEED_VENV:-$INSTANCE_ROOT/.venv}"
+CONFIG_FILE="${OPENFEED_CONFIG_FILE:-$INSTANCE_ROOT/openfeed.yaml}"
+
+usage() {
+  echo "usage: $0 [--config PATH] [--output DIR] [--code-root DIR] [--venv DIR] supply|refill|prepare|discover|start" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      [[ $# -ge 2 ]] || usage
+      CONFIG_FILE="$2"
+      shift 2
+      ;;
+    --output)
+      [[ $# -ge 2 ]] || usage
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    --code-root)
+      [[ $# -ge 2 ]] || usage
+      CODE_ROOT="$2"
+      shift 2
+      ;;
+    --venv)
+      [[ $# -ge 2 ]] || usage
+      VENV="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      usage
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+[[ $# -eq 1 ]] || usage
+COMMAND="$1"
+
+if [[ ! -d "$CODE_ROOT" ]]; then
+  echo "missing openfeed code root: $CODE_ROOT" >&2
+  exit 2
+fi
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "missing openfeed config file: $CONFIG_FILE" >&2
+  exit 2
+fi
+
+if [[ ! -x "$VENV/bin/python" ]]; then
+  echo "missing openfeed virtualenv: $VENV" >&2
+  exit 2
+fi
+
+CODE_ROOT="$(cd "$CODE_ROOT" && pwd)"
+CONFIG_FILE="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(basename "$CONFIG_FILE")"
+VENV="$(cd "$VENV" && pwd)"
+
+if [[ -n "${OPENFEED_PATH_PREFIX:-}" ]]; then
+  export PATH="$VENV/bin:$OPENFEED_PATH_PREFIX:$PATH"
+else
+  export PATH="$VENV/bin:$PATH"
+fi
+
+if [[ -f "$INSTANCE_ROOT/.env.local" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$INSTANCE_ROOT/.env.local"
+  set +a
+fi
+
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+
+export OPENFEED_WORKDIR="$OUTPUT_DIR"
+export OPENFEED_VENV="$VENV"
+export OPENFEED_CONFIG_FILE="$CONFIG_FILE"
+export PYTHONPATH="$CODE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+if [[ "$COMMAND" != "start" ]]; then
+  exec "$CODE_ROOT/scripts/openfeed-cron-run" "$COMMAND"
+fi
+
+LOG_DIR="$OUTPUT_DIR/logs"
+mkdir -p "$LOG_DIR"
+cd "$OUTPUT_DIR"
+
+echo "Running openfeed doctor..."
+"$VENV/bin/openfeed-doctor" --config "$CONFIG_FILE" --workdir "$OUTPUT_DIR"
+
+export OPENFEED_DISABLE_PUSH="${OPENFEED_DISABLE_PUSH:-0}"
+export OPENFEED_DISABLE_FEEDBACK="${OPENFEED_DISABLE_FEEDBACK:-0}"
+export OPENFEED_DISABLE_LEARN="${OPENFEED_DISABLE_LEARN:-0}"
+
+PIDS=()
+PID_NAMES=()
+
+stop_all() {
+  for pid in "${PIDS[@]}"; do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+  for pid in "${PIDS[@]}"; do
+    wait "$pid" >/dev/null 2>&1 || true
+  done
+}
+
+trap stop_all EXIT
+trap 'stop_all; exit 0' INT TERM
+
+start_process() {
+  local name="$1"
+  shift
+  {
+    echo
+    echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) openfeed $name started ===="
+    "$@"
+  } >> "$LOG_DIR/$name.out" 2>&1 &
+  PIDS+=("$!")
+  PID_NAMES+=("$name")
+}
+
+start_process supply "$VENV/bin/openfeed-supply-cycle" --loop --interval "${OPENFEED_SUPPLY_INTERVAL:-900}"
+start_process refill "$VENV/bin/openfeed-refill-cycle" --loop
+start_process local-server "$VENV/bin/openfeed-local-server" --open
+
+{
+  echo
+  echo "==== $(date -u +%Y-%m-%dT%H:%M:%SZ) openfeed prepare started ===="
+  while true; do
+    "$VENV/bin/openfeed-prepare-video" || true
+    sleep "${OPENFEED_PREPARE_INTERVAL:-10}"
+  done
+} >> "$LOG_DIR/prepare.out" 2>&1 &
+PIDS+=("$!")
+
+echo "OpenFeed is running."
+echo "Local feed: http://127.0.0.1:8765/"
+echo "Logs: $LOG_DIR"
+echo "Press Ctrl-C to stop."
+
+while true; do
+  for i in "${!PIDS[@]}"; do
+    pid="${PIDS[$i]}"
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      wait "$pid" || true
+      name="${PID_NAMES[$i]}"
+      echo "openfeed $name exited; stopping the rest" >&2
+      echo "last log lines from $LOG_DIR/$name.out:" >&2
+      tail -n 40 "$LOG_DIR/$name.out" >&2 || true
+      exit 1
+    fi
+  done
+  sleep 2
+done

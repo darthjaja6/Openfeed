@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <title>{{card.title}}</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    html,body{width:100vw;height:100vh;overflow:hidden;background:{{style.bg}};color:{{style.text}};
+      font:17px/1.45 {{style.font|default('"Avenir Next","Avenir",-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif')}};
+      font-weight:520;-webkit-font-smoothing:antialiased;letter-spacing:0}
+    #ticlawk-root{position:relative;width:100vw;height:100vh;overflow:hidden;background:{{style.bg}};
+      background-image:{{style.backdrop|default('none') }}}
+    #ticlawk-root::before{content:"";position:absolute;inset:0;pointer-events:none;
+      background:{{style.overlay|default('linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.18))') }};
+      z-index:1}
+    .source-link{position:absolute;top:22px;right:18px;z-index:20;color:{{style.text}};text-decoration:none;
+      padding:8px 12px;border-radius:999px;border:1px solid {{style.border}};
+      background:{{style.pill_bg|default('rgba(0,0,0,.36)') }};font-size:12px;font-weight:760;letter-spacing:0;
+      backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+    .topic-mark{position:absolute;top:24px;left:24px;z-index:20;color:{{style.accent}};font-size:11px;
+      font-weight:820;letter-spacing:0;text-transform:uppercase}
+    .pages{position:relative;z-index:5;display:flex;width:100vw;height:100vh;overflow-x:auto;overflow-y:hidden;
+      scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch}
+    .pages::-webkit-scrollbar{display:none;width:0}
+    .page{flex:0 0 100vw;height:100vh;scroll-snap-align:start;scroll-snap-stop:always;position:relative;padding:0}
+    .panel{position:absolute;left:28px;top:50%;transform:translateY(-50%);
+      width:min(318px, calc(100vw - 72px));min-width:0;padding:{{style.frame_padding|default('0') }};border:{{style.frame_border|default('0') }};
+      border-radius:{{style.frame_radius|default('0') }};background:{{style.frame_bg|default('transparent') }};
+      box-shadow:{{style.frame_shadow|default('none') }}}
+    .kicker{color:{{style.accent}};font-size:12px;font-weight:850;letter-spacing:0;text-transform:uppercase;margin-bottom:16px}
+    h1{font-size:min({{style.title_size|default('31px') }},31px);line-height:1.08;font-weight:850;letter-spacing:0;color:{{style.text}};
+      overflow-wrap:anywhere;word-break:break-word}
+    .subtitle{margin-top:18px;color:{{style.muted}};font-size:18px;line-height:1.36;font-weight:560}
+    .heading{color:{{style.accent2|default(style.accent) }};font-size:15px;font-weight:850;letter-spacing:0;text-transform:uppercase;margin-bottom:16px}
+    .body{color:{{style.text}};font-size:min({{style.body_size|default('22px') }},22px);line-height:1.34;font-weight:620;letter-spacing:0;
+      overflow-wrap:anywhere;word-break:break-word}
+    .body p+p{margin-top:14px}
+    .dots{position:absolute;z-index:30;bottom:92px;left:0;right:0;display:flex;justify-content:center;gap:7px;pointer-events:none}
+    .dots span{width:6px;height:6px;border-radius:50%;background:{{style.dot|default('rgba(255,255,255,.28)') }};transition:transform .2s,background .2s}
+    .dots span.active{background:{{style.accent}};transform:scale(1.25)}
+    .footer-line{position:absolute;z-index:20;bottom:34px;left:28px;right:28px;display:flex;justify-content:space-between;
+      color:{{style.muted}};font-size:11px;font-weight:720;letter-spacing:0;text-transform:uppercase}
+    .footer-line span{max-width:48%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .footer-line span:last-child{text-align:right}
+  </style>
+</head>
+<body>
+  <div id="ticlawk-root">
+    <div class="topic-mark">{{style.label}}</div>
+    <a class="source-link" href="{{card.url}}" target="_blank" rel="noopener noreferrer">Open</a>
+    <div class="pages" id="pages"></div>
+    <div class="dots" id="dots"></div>
+    <div class="footer-line"><span id="source-host"></span><span>{{style.footer|default('OpenFeed') }}</span></div>
+  </div>
+  <script>
+    (() => {
+      const input = {{HTMLCardRenderInput|tojson}};
+      const card = input.card || {};
+      const n = card.normalized || {};
+      const d = card.derived || {};
+      const pages = document.getElementById('pages');
+      const dots = document.getElementById('dots');
+      try { document.getElementById('source-host').textContent = new URL(card.url || '').hostname.replace(/^www\./, ''); } catch { document.getElementById('source-host').textContent = 'Web'; }
+      function page(kind) {
+        const section = document.createElement('section');
+        section.className = 'page ' + kind;
+        const panel = document.createElement('div');
+        panel.className = 'panel';
+        section.appendChild(panel);
+        pages.appendChild(section);
+        return panel;
+      }
+      function text(el, value) {
+        el.textContent = value == null ? '' : String(value);
+      }
+      const cover = page('cover');
+      const kicker = document.createElement('div');
+      kicker.className = 'kicker';
+      text(kicker, '{{style.kicker|default("Brief") }}');
+      const h1 = document.createElement('h1');
+      text(h1, n.title || card.title || '');
+      const subtitle = document.createElement('div');
+      subtitle.className = 'subtitle';
+      text(subtitle, d.subtitle || n.summary || '');
+      cover.appendChild(kicker);
+      cover.appendChild(h1);
+      if (subtitle.textContent.trim()) cover.appendChild(subtitle);
+      const takeaways = Array.isArray(d.takeaways) ? d.takeaways : [];
+      takeaways.forEach((item) => {
+        const panel = page('point');
+        const heading = document.createElement('div');
+        heading.className = 'heading';
+        text(heading, item.heading || 'Key point');
+        const body = document.createElement('div');
+        body.className = 'body';
+        String(item.body || '').split(/\n\n+/).filter(Boolean).forEach((part) => {
+          const p = document.createElement('p');
+          text(p, part.replace(/\s+/g, ' ').trim());
+          body.appendChild(p);
+        });
+        if (!body.children.length) {
+          const p = document.createElement('p');
+          text(p, item.body || '');
+          body.appendChild(p);
+        }
+        panel.appendChild(heading);
+        panel.appendChild(body);
+      });
+      const pageNodes = [...pages.querySelectorAll('.page')];
+      pageNodes.forEach(() => dots.appendChild(document.createElement('span')));
+      const dotNodes = [...dots.querySelectorAll('span')];
+      if (!dotNodes.length) return;
+      dotNodes[0].classList.add('active');
+      pages.addEventListener('scroll', () => {
+        requestAnimationFrame(() => {
+          const idx = Math.round(pages.scrollLeft / window.innerWidth);
+          dotNodes.forEach((d, i) => d.classList.toggle('active', i === idx));
+        });
+      }, {passive: true});
+    })();
+  </script>
+</body>
+</html>
