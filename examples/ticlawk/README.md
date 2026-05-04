@@ -1,12 +1,13 @@
 # Ticlawk Feed Example
 
-This example reads from TikTok and pushes cards to Ticlawk via
-`consumer_type: ticlawk`.
+This example uses `consumer_type: ticlawk` instead of the built-in local web
+consumer used by the main Quickstart.
 
-Copy `openfeed.yaml`, `.env.local.example`, and `run-openfeed` to your instance
-root. Install Browser Bridge, log in to TikTok in Google Chrome, then set
-`TICLAWK_PUBLISHER_API_KEY` and replace `your-ticlawk-channel-id` before
-running OpenFeed.
+Start with [the main Quickstart setup](../../README.md#quickstart), but copy
+`openfeed.yaml`, `.env.local.example`, and `run-openfeed` from this directory.
+Use the same install, Chrome, TikTok, and OpenRouter steps from the main
+Quickstart. Set `TICLAWK_PUBLISHER_API_KEY` in `.env.local` and replace
+`your-ticlawk-channel-id` in `openfeed.yaml`.
 
 Before starting the full producer, verify the Ticlawk publishing path:
 

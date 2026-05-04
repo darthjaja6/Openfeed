@@ -22,5 +22,5 @@ feedback ledger:
 
 ```bash
 cd output
-OPENFEED_CONFIG_FILE=../openfeed.yaml uv run --project ../../.. openfeed-collect-feedback
+OPENFEED_CONFIG_FILE=../openfeed.yaml uv run --project ../../../.. openfeed-collect-feedback
 ```

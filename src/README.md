@@ -9,4 +9,4 @@ Keep only:
 
 Do not keep reusable engine implementation here.
 
-The maintained engine lives in `packages/openfeed/src/core/`.
+The maintained engine lives in `src/openfeed/core/`.
