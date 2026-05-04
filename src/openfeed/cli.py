@@ -4,7 +4,7 @@ import sys
 
 
 def _usage() -> None:
-    print("usage: openfeed doctor [--config PATH] [--workdir PATH] [--no-network]")
+    print("usage: openfeed doctor|smoke-publish|status [options]")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,6 +17,14 @@ def main(argv: list[str] | None = None) -> int:
         from openfeed.doctor import main as doctor_main
 
         return doctor_main(args)
+    if command == "smoke-publish":
+        from openfeed.smoke_publish import main as smoke_main
+
+        return smoke_main(args)
+    if command == "status":
+        from openfeed.status import main as status_main
+
+        return status_main(args)
     print(f"unknown command: {command}", file=sys.stderr)
     _usage()
     return 2

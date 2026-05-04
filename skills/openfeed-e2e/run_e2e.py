@@ -47,6 +47,7 @@ def check(name: str):
 @check("module imports")
 def _():
     """Every top-level openfeed module imports without error."""
+    import openfeed.cli  # noqa: F401
     import openfeed.core.discover  # noqa: F401
     import openfeed.core.patrol  # noqa: F401
     import openfeed.core.filter  # noqa: F401
@@ -61,10 +62,13 @@ def _():
     import openfeed.core.refill_cycle  # noqa: F401
     import openfeed.core.interest_bootstrap  # noqa: F401
     import openfeed.core.deep_dive  # noqa: F401
+    import openfeed.smoke_publish  # noqa: F401
+    import openfeed.status  # noqa: F401
     import openfeed.prompts.content_deep_diving  # noqa: F401
     import openfeed.utils.catalog_io  # noqa: F401
     import openfeed.utils.queue_io  # noqa: F401
     import openfeed.utils.cycle_summary  # noqa: F401
+    import openfeed.utils.run_with_lock  # noqa: F401
     import openfeed.utils.logging_setup  # noqa: F401
     import openfeed.clients.content.opencli  # noqa: F401
     import openfeed.clients.content.youtube_download  # noqa: F401
@@ -242,6 +246,61 @@ def _():
             server.shutdown()
             server.server_close()
             os.chdir(cwd)
+
+
+@check("smoke_publish selects ticlawk topic and emits minimal html card")
+def _():
+    from openfeed.models.interests import InterestEntry
+    from openfeed.smoke_publish import _push_one, _select_topics
+
+    tic = InterestEntry(
+        topic="tic", description="d", platforms={"youtube": {}},
+        consumer_type="ticlawk",
+        consumer_config={"channel_id": "ch_tic"},
+        language_preferences=["English"],
+    )
+    local = InterestEntry(
+        topic="local", description="d", platforms={"youtube": {}},
+        consumer_type="local_web",
+        consumer_config={"channel_id": "default"},
+        language_preferences=["English"],
+    )
+
+    selected = _select_topics([local, tic], topic=None, all_topics=False)
+    assert [entry.topic for entry in selected] == ["tic"]
+    assert _select_topics([local, tic], topic="tic", all_topics=False) == [tic]
+
+    calls = []
+
+    def fake_push_card(**kwargs):
+        calls.append(kwargs)
+        return {"id": "card_123"}
+
+    record = _push_one(tic, push_card=fake_push_card)
+    assert record["id"] == "card_123"
+    assert calls[0]["channel_id"] == "ch_tic"
+    assert calls[0]["content_subtype"] == "html"
+    assert "OpenFeed smoke test" in calls[0]["html"]
+    assert "ch_tic" in calls[0]["html"]
+
+
+@check("push metrics fail closed and ticlawk normalizes cards_unread")
+def _():
+    from openfeed.clients.consumer import ticlawk
+    from openfeed.core.push import _unconsumed_from_metrics
+
+    assert _unconsumed_from_metrics({"unconsumed_total": 4}) == 4
+    assert _unconsumed_from_metrics({"cards_unread": 3}) == 3
+    assert _unconsumed_from_metrics({}) is None
+    assert _unconsumed_from_metrics({"other": 0}) is None
+
+    original = ticlawk._request
+    try:
+        ticlawk._request = lambda *args, **kwargs: {"data": {"cards_unread": 7}}  # type: ignore[assignment]
+        metrics = ticlawk.get_channel_metrics("channel")
+        assert metrics["unconsumed_total"] == 7
+    finally:
+        ticlawk._request = original  # type: ignore[assignment]
 
 
 @check("feedback_state legacy single-cursor migrates to per-topic cursors")

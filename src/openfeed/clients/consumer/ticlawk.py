@@ -334,6 +334,8 @@ def get_channel_metrics(channel_id: str) -> dict[str, Any]:
     data = envelope.get("data") if isinstance(envelope, dict) else None
     if not isinstance(data, dict):
         raise TiclawkError(f"GET /api/channels/{channel_id}/metrics unexpected shape: {envelope!r}")
+    if "unconsumed_total" not in data and "cards_unread" in data:
+        data["unconsumed_total"] = data["cards_unread"]
     return data
 
 

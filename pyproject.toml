@@ -37,6 +37,8 @@ openfeed-refill-cycle = "openfeed.core.refill_cycle:main"
 openfeed-backpressure = "openfeed.utils.backpressure:main"
 openfeed-topic-reconcile = "openfeed.core.topic_reconcile:main"
 openfeed-local-server = "openfeed.clients.consumer.local_web:main"
+openfeed-smoke-publish = "openfeed.smoke_publish:main"
+openfeed-status = "openfeed.status:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

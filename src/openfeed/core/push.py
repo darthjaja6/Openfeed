@@ -116,6 +116,24 @@ def _append_history(entry: HistoryEntry) -> None:
         f.write(entry.model_dump_json() + "\n")
 
 
+def _unconsumed_from_metrics(metrics: dict) -> int | None:
+    """Consumer metrics → unread buffer count.
+
+    `unconsumed_total` is OpenFeed's canonical field. Ticlawk's public API has
+    also exposed `cards_unread`; accept that alias, but fail closed when neither
+    exists so a schema drift cannot be interpreted as "0 unread" and spam a
+    channel.
+    """
+    for name in ("unconsumed_total", "cards_unread"):
+        if name not in metrics or metrics.get(name) is None:
+            continue
+        try:
+            return max(0, int(metrics[name]))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Selection
 # ---------------------------------------------------------------------------
@@ -558,7 +576,15 @@ def main(argv: list[str] | None = None) -> int:
             if blocked:
                 break
             continue
-        unconsumed = int(metrics.get("unconsumed_total") or 0)
+        unconsumed = _unconsumed_from_metrics(metrics)
+        if unconsumed is None:
+            logger.warning(
+                "get_metrics for [%s] missing unread count "
+                "(expected unconsumed_total or cards_unread): %s — skip topic",
+                topic, metrics,
+            )
+            cycle_summary.add("push", skipped_metrics_missing=topic)
+            continue
         gap = max(0, cfg.target_buffer - unconsumed)
         n = min(gap, remaining_global)
         if n <= 0:

@@ -11,6 +11,7 @@ import hashlib
 import html as html_lib
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -292,6 +293,31 @@ def _chrome_bin() -> str | None:
             path = shutil.which(value)
             if path:
                 return path
+    system = platform.system()
+    if system == "Darwin":
+        return _first_existing_path(
+            (
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                str(Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                str(Path.home() / "Applications/Chromium.app/Contents/MacOS/Chromium"),
+            )
+        )
+    if system == "Linux":
+        return _linux_chrome_bin()
+    # Keep non-primary platforms best-effort without promising support.
+    return _linux_chrome_bin()
+
+
+def _first_existing_path(candidates: tuple[str, ...]) -> str | None:
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if path.is_file():
+            return str(path)
+    return None
+
+
+def _linux_chrome_bin() -> str | None:
     for candidate in (
         "google-chrome",
         "google-chrome-stable",
@@ -301,4 +327,14 @@ def _chrome_bin() -> str | None:
         path = shutil.which(candidate)
         if path:
             return path
+    for candidate in (
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+    ):
+        path = Path(candidate)
+        if path.is_file():
+            return str(path)
     return None
