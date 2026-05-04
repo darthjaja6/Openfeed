@@ -36,7 +36,7 @@ chmod +x run-openfeed
 mkdir -p output
 ```
 
-### 2. Connect Chrome to TikTok
+### 2. Connect Chrome to Opencli
 
 Install opencli:
 
@@ -90,16 +90,18 @@ needs to find sources, review content, and build the queue.
 
 ## Next Steps
 
-### Change What OpenFeed Finds
+### Change your Preference Settings
 
 Edit `openfeed.yaml` to change your topic, description, language preferences,
 or enabled platforms. The next `./run-openfeed start` run reads the updated
 config and reconciles topic state before collecting new content.
 
-### Run in the Background
+### Keep a long-running job
 
-`./run-openfeed start` is the foreground runner. After the Quickstart works, use
-cron on a machine that should keep OpenFeed running:
+The benefit of turning Openfeed to a long-running job is that it can check your
+content consumption status and continuously refill your feed. `./run-openfeed start` 
+is the foreground runner. After the Quickstart works, use cron on a machine that 
+should keep OpenFeed running:
 
 ```cron
 */15 * * * * /path/to/my-openfeed/run-openfeed supply
@@ -110,10 +112,13 @@ cron on a machine that should keep OpenFeed running:
 
 ### Push to Ticlawk
 
-The Quickstart uses `examples/web` and shows cards on localhost. To push to
-Ticlawk instead, use [the Ticlawk example](examples/ticlawk/README.md).
-Ticlawk is useful when you want the feed in a hosted app instead of only on
-your local machine. The same consumer contract is described in
+The Quickstart uses `examples/web` to show you how the system works, 
+but it lacks the learning phase. To fully utilize the power of Openfeed,
+you can push cards to Ticlawk. It exposes your content consumption stats
+so that Openfeed can learn from it and adjust the content it finds for you,
+just like a recommendation system.
+To do this, follow [the Ticlawk example](examples/ticlawk/README.md).
+The same consumer contract is described in
 [Custom feed clients](docs/custom-producer.md).
 
 ## Advanced
