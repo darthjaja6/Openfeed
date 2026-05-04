@@ -9,6 +9,9 @@ Use the same install, Chrome, TikTok, and OpenRouter steps from the main
 Quickstart. Set `TICLAWK_PUBLISHER_API_KEY` in `.env.local` and replace
 `your-ticlawk-channel-id` in `openfeed.yaml`.
 
+For creating a Ticlawk channel and finding the publisher API key and channel
+ID, see the [Ticlawk public examples](https://github.com/darthjaja6/ticlawk-public).
+
 Before starting the full producer, verify the Ticlawk publishing path:
 
 ```bash
