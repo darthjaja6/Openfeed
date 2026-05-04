@@ -122,6 +122,6 @@ ledgers to recover.
 ## Further reading
 
 - [`operations.md`](operations.md) — production operations and recovery notes
-- [`docs/runtime-config.md`](runtime-config.md) — every `runtime` field in `openfeed.yaml`
+- [`docs/runtime-config.md`](runtime-config.md) — internal runtime defaults
 - [`docs/custom-producer.md`](custom-producer.md) — writing your own feed
   producer

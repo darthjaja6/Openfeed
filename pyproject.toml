@@ -41,3 +41,6 @@ openfeed-local-server = "openfeed.clients.consumer.local_web:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["openfeed*"]
+
+[tool.setuptools.package-data]
+openfeed = ["default_runtime.yaml"]

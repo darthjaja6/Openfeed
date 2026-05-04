@@ -1,10 +1,12 @@
-# `openfeed.yaml` runtime reference
+# Internal runtime defaults
 
-The top-level `runtime` section in `openfeed.yaml` is the operational tuning
-surface. Defaults work for typical home use; tweak when you understand why.
+OpenFeed runtime knobs live in source code at
+`src/openfeed/default_runtime.yaml`. They are internal defaults, not user
+onboarding config.
 
-After editing `openfeed.yaml`, changes apply on the next phase invocation. No
-daemon restart is needed unless that phase is already mid-tick.
+User instance files should not include a top-level `runtime` section. If you
+want to change these values, fork or patch OpenFeed source, then restart the
+affected process.
 
 ---
 
@@ -34,7 +36,7 @@ daemon restart is needed unless that phase is already mid-tick.
 | field | default | meaning |
 |---|---|---|
 | `score_weights.{popularity,engagement,freshness,preference}` | 0.3/0.3/0.25/0.15 | Composite-score weights (sum doesn't have to equal 1) |
-| `composite_score_threshold` | 0.20 | Below → reject as `low_composite_score` |
+| `composite_score_threshold` | 0.05 | Below → reject as `low_composite_score` |
 | `freshness_half_life_days_default` | 7 | Exp-decay half-life for freshness sub-score |
 | `freshness_half_life_days_per_topic` | `{}` | Override default per topic |
 | `admission_rate_ema_alpha` | 0.3 | EMA smoothing on `source.admission_rate` |
@@ -50,26 +52,26 @@ daemon restart is needed unless that phase is already mid-tick.
 
 | field | default | meaning |
 |---|---|---|
-| `topic_floor` | 15 | Per-topic minimum inventory; below → refill signal to patrol |
-| `topic_capacity` | 45 | Per-topic target inventory; each topic refills independently |
+| `topic_floor` | 3 | Per-topic minimum inventory; below → refill signal to patrol |
+| `topic_capacity` | 5 | Per-topic target inventory; each topic refills independently |
 
 ## `push`
 
 | field | default | meaning |
 |---|---|---|
-| `target_buffer` | 15 | Push until producer's unconsumed count ≥ this |
-| `max_per_tick` | 15 | Safety cap per tick |
-| `same_source_gap` | 5 | Last N pushes can't share source (spacing) |
-| `top_k` | 3 | Sample from top-K by rank_score within chosen topic |
+| `target_buffer` | 3 | Push until producer's unconsumed count ≥ this |
+| `max_per_tick` | 3 | Safety cap per tick |
+| `same_source_gap` | 2 | Last N pushes can't share source (spacing) |
+| `top_k` | 2 | Sample from top-K by rank_score within chosen topic |
 | `producer` | `"ticlawk"` | Card producer name (currently only `ticlawk`) |
 | `tick_budget_seconds` | 30 | Wall-clock cap for render+push per tick |
-| `render_workers` | 16 | Render threadpool size for lazy render |
+| `render_workers` | 4 | Render threadpool size for lazy render |
 
 ## `refill_cycle`
 
 | field | default | meaning |
 |---|---|---|
-| `interval_seconds` | 30 | Consumer-side tick rate |
+| `interval_seconds` | 10 | Consumer-side tick rate |
 
 ## `collect_feedback`
 

@@ -120,7 +120,7 @@ machine. The same consumer contract is described in
 ## Advanced
 
 - [Production operations](docs/operations.md)
-- [Runtime tuning](docs/runtime-config.md)
+- [Internal runtime defaults](docs/runtime-config.md)
 - [Custom feed clients](docs/custom-producer.md)
 - [Architecture](docs/architecture.md)
 

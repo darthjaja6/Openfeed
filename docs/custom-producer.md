@@ -129,6 +129,6 @@ include `{since}`.
 - `http`: generic HTTP protocol adapter for custom clients.
 - `ticlawk`: first-party shortcut for Ticlawk's existing API.
 
-`runtime.push.producer` is still the card renderer name. It defaults to
+The card renderer name is an internal runtime default. It currently defaults to
 `ticlawk` because those renderers produce the shared `CardPayload` shape used by
 all current consumers.

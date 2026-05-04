@@ -5,9 +5,11 @@ filter / etc. read it. Keep fields minimal; add new ones as tasks come online.
 """
 from __future__ import annotations
 
+from importlib import resources
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
+import yaml
 
 from openfeed.utils.config_files import config_path, load_openfeed_config
 
@@ -357,6 +359,14 @@ class RuntimeConfig(BaseModel):
 def load_runtime(workdir: Path) -> RuntimeConfig:
     del workdir
     raw = load_openfeed_config()
-    if "runtime" not in raw:
-        raise ValueError(f"missing required config field 'runtime' in {config_path()}")
-    return RuntimeConfig.model_validate(raw["runtime"])
+    if "runtime" in raw:
+        raise ValueError(
+            "runtime is no longer configured in openfeed.yaml. "
+            f"Remove the top-level 'runtime' section from {config_path()}; "
+            "OpenFeed uses source-code runtime defaults."
+        )
+    default_runtime = resources.files("openfeed").joinpath("default_runtime.yaml")
+    parsed = yaml.safe_load(default_runtime.read_text(encoding="utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError(f"default runtime config must be a mapping: {default_runtime}")
+    return RuntimeConfig.model_validate(parsed)
