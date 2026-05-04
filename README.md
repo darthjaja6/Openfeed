@@ -1,4 +1,4 @@
-# openfeed
+# Openfeed
 
 OpenFeed is an LLM-powered personal recommendation system that finds
 cross-platform internet content tailored to your interests and learns from your
