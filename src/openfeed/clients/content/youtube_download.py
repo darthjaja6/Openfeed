@@ -20,6 +20,7 @@ this feed.
 """
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import time
@@ -32,6 +33,16 @@ _TV_CLIENT_ARGS: tuple[str, ...] = (
     "--cookies-from-browser", "chrome",
     "--extractor-args", "youtube:player_client=tv",
 )
+
+_MAX_IOS_H264_LEVEL = 41
+_REPAIRED_H264_LEVEL = "4.1"
+_ALLOWED_H264_PROFILES = {
+    "Baseline",
+    "Constrained Baseline",
+    "Main",
+    "High",
+}
+
 
 class YouTubeDownloadError(RuntimeError):
     """The 720p download failed. `tier_errors` lists stderr summaries."""
@@ -64,6 +75,125 @@ def _too_large(path: Path, max_filesize_mb: int | None) -> bool:
     if max_filesize_mb is None or max_filesize_mb <= 0:
         return False
     return path.stat().st_size > max_filesize_mb * 1024 * 1024
+
+
+def _ffprobe(path: Path) -> tuple[dict, dict | None, dict | None]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type,codec_name,codec_tag_string,profile,level,width,height,pix_fmt",
+        "-of",
+        "json",
+        str(path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout).strip()[:200]
+        raise YouTubeDownloadPermanentError(
+            f"ffprobe failed for {path}: {err}",
+            [("ffprobe", err or f"rc={proc.returncode}")],
+        )
+    data = json.loads(proc.stdout or "{}")
+    streams = data.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    return data, video, audio
+
+
+def _is_exact_target_resolution(video: dict, target_height: int) -> bool:
+    target = max(1, target_height)
+    return video.get("width") == target or video.get("height") == target
+
+
+def _ios_compatibility_error(video: dict | None, audio: dict | None, target_height: int) -> str | None:
+    if video is None:
+        return "missing video stream"
+    if video.get("codec_name") != "h264":
+        return f"video codec is {video.get('codec_name')}, expected h264"
+    tag = video.get("codec_tag_string")
+    if tag and tag != "avc1":
+        return f"video codec tag is {tag}, expected avc1"
+    if not _is_exact_target_resolution(video, target_height):
+        return (
+            f"video resolution is {video.get('width')}x{video.get('height')}, "
+            f"expected exact {target_height}p"
+        )
+    profile = video.get("profile")
+    if profile not in _ALLOWED_H264_PROFILES:
+        return f"H.264 profile is {profile}, expected Main/High-compatible"
+    if video.get("pix_fmt") != "yuv420p":
+        return f"pixel format is {video.get('pix_fmt')}, expected yuv420p"
+    level = video.get("level")
+    if not isinstance(level, int) or level <= 0:
+        return f"H.264 level is {level}, expected a positive level"
+    if level > _MAX_IOS_H264_LEVEL:
+        return f"H.264 level is {level / 10:.1f}, expected <= 4.1"
+    if audio is not None and audio.get("codec_name") != "aac":
+        return f"audio codec is {audio.get('codec_name')}, expected aac"
+    return None
+
+
+def _remux_mp4_for_ios(
+    path: Path,
+    *,
+    target_level: str | None,
+    timeout_seconds: int,
+) -> None:
+    tmp = path.with_name(f"{path.stem}.ios.tmp{path.suffix}")
+    tmp.unlink(missing_ok=True)
+    cmd = ["ffmpeg", "-y", "-i", str(path), "-c", "copy"]
+    if target_level is not None:
+        cmd += ["-bsf:v", f"h264_metadata=level={target_level}"]
+    cmd += ["-movflags", "+faststart", str(tmp)]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=max(30, timeout_seconds),
+        )
+    except subprocess.TimeoutExpired as exc:
+        tmp.unlink(missing_ok=True)
+        raise YouTubeDownloadError(
+            f"ffmpeg remux timed out for {path}: {exc}",
+            [("ffmpeg_remux", "timeout")],
+        ) from exc
+    if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size <= 0:
+        err = (proc.stderr or proc.stdout).strip().splitlines()
+        msg = (err[-1] if err else f"rc={proc.returncode}")[:200]
+        tmp.unlink(missing_ok=True)
+        raise YouTubeDownloadPermanentError(
+            f"ffmpeg remux failed for {path}: {msg}",
+            [("ffmpeg_remux", msg)],
+        )
+    tmp.replace(path)
+
+
+def _ensure_ios_compatible(path: Path, *, target_height: int, timeout_seconds: int) -> None:
+    _, video, audio = _ffprobe(path)
+    if video is None:
+        raise YouTubeDownloadPermanentError(
+            f"iOS compatibility check failed for {path}: missing video stream",
+            [("ffprobe", "missing video stream")],
+        )
+    level = video.get("level")
+    target_level = _REPAIRED_H264_LEVEL if isinstance(level, int) and level > _MAX_IOS_H264_LEVEL else None
+    _remux_mp4_for_ios(path, target_level=target_level, timeout_seconds=timeout_seconds)
+    _, repaired_video, repaired_audio = _ffprobe(path)
+    err = _ios_compatibility_error(repaired_video, repaired_audio or audio, target_height)
+    if err is not None:
+        raise YouTubeDownloadPermanentError(
+            f"iOS compatibility check failed for {path}: {err}",
+            [("ios_compatibility", err)],
+        )
+    if target_level is not None:
+        _logger.info(
+            "repaired H.264 level from %.1f to %s for iOS compatibility",
+            level / 10,
+            target_level,
+        )
 
 
 def download(
@@ -119,6 +249,11 @@ def download(
         )
     elapsed = time.monotonic() - t0
     if r.returncode == 0 and target_path.exists() and target_path.stat().st_size > 0:
+        _ensure_ios_compatible(
+            target_path,
+            target_height=max_height,
+            timeout_seconds=timeout_seconds,
+        )
         if _too_large(target_path, max_filesize_mb):
             size_mb = target_path.stat().st_size / 1024 / 1024
             err = f"{size_mb:.1f} MB exceeds max_filesize_mb={max_filesize_mb}"
