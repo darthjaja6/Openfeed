@@ -300,7 +300,8 @@ class YouTubeDownloadConfig(BaseModel):
     max_per_tick: int                          # how many videos to try per tick
     max_concurrent: int                        # parallel yt-dlp processes
     tick_budget_seconds: int                   # wall-clock cap per tick
-    target_height: int                         # max height for format selection (e.g. 720)
+    target_height: int                         # target resolution for yt-dlp `-S res:N` (e.g. 720)
+    max_filesize_mb: int                       # skip/downshift files that are too large for the consumer
     failure_backoff_minutes: int               # don't retry a failed video sooner than this
     max_failures_before_permanent: int         # mark permanently_failed after N consecutive fails
 

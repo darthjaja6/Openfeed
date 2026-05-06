@@ -50,7 +50,9 @@ from openfeed.clients.content.tiktok import (
     tiktok_download,
 )
 from openfeed.clients.content.youtube_download import (
-    YouTubeDownloadError, download as yt_download,
+    YouTubeDownloadError,
+    YouTubeDownloadPermanentError,
+    download as yt_download,
 )
 from openfeed.models.image_cache import ImageCacheEntry, ImageCacheIndex
 from openfeed.models.queue import Queue
@@ -316,8 +318,8 @@ def _download_one(
     content_id: str,
     url: str,
     cfg: YouTubeDownloadConfig | TikTokDownloadConfig,
-) -> tuple[str, Path | None, str | None]:
-    """Returns (content_id, local_path | None, error_message | None)."""
+) -> tuple[str, Path | None, str | None, bool]:
+    """Returns (content_id, local_path | None, error_message | None, permanent)."""
     target = _CACHE_DIR / f"{content_id}.mp4"
     try:
         if platform == "youtube":
@@ -326,6 +328,7 @@ def _download_one(
                 content_id,
                 target,
                 max_height=cfg.target_height,
+                max_filesize_mb=cfg.max_filesize_mb,
                 timeout_seconds=cfg.tick_budget_seconds,
             )
         elif platform == "tiktok":
@@ -338,11 +341,13 @@ def _download_one(
             )
         else:
             raise RuntimeError(f"unsupported video platform: {platform}")
-        return content_id, target, None
+        return content_id, target, None, False
+    except YouTubeDownloadPermanentError as exc:
+        return content_id, None, str(exc), True
     except (YouTubeDownloadError, TikTokYtDlpError) as exc:
-        return content_id, None, str(exc)
+        return content_id, None, str(exc), False
     except Exception as exc:  # noqa: BLE001 — defensive
-        return content_id, None, f"unexpected: {exc!r}"
+        return content_id, None, f"unexpected: {exc!r}", False
 
 
 def _image_ext(url: str, content_type: str | None) -> str:
@@ -487,9 +492,9 @@ def _run_tick(
                 logger.info("[%s] tick budget exhausted, will retry next tick", content_id)
                 continue
             try:
-                video_id, local_path, err = fut.result()
+                video_id, local_path, err, permanent = fut.result()
             except Exception as exc:  # noqa: BLE001
-                video_id, local_path, err = content_id, None, f"future error: {exc!r}"
+                video_id, local_path, err, permanent = content_id, None, f"future error: {exc!r}", False
 
             entry = index.videos.get(video_id) or VideoCacheEntry(
                 video_id=video_id, state="failed",
@@ -509,7 +514,13 @@ def _run_tick(
                 entry.failure_count += 1
                 entry.last_failed_at = _utc_now_iso()
                 entry.last_error = (err or "unknown")[:300]
-                if entry.failure_count >= cfg.max_failures_before_permanent:
+                if permanent:
+                    entry.state = "permanently_failed"
+                    logger.warning(
+                        "[%s] permanently_failed by download policy: %s",
+                        video_id, entry.last_error,
+                    )
+                elif entry.failure_count >= cfg.max_failures_before_permanent:
                     entry.state = "permanently_failed"
                     logger.warning(
                         "[%s] permanently_failed after %d attempts: %s",

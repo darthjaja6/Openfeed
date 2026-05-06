@@ -79,6 +79,7 @@ youtube_download:
   max_concurrent: 4
   tick_budget_seconds: 180
   target_height: 720
+  max_filesize_mb: 80
   failure_backoff_minutes: 30
   max_failures_before_permanent: 5
 tiktok_download:

@@ -429,7 +429,11 @@ def _push_one(pick: QueueItem, spec, consumer_config) -> dict | None:
             logger.warning("ticlawk video asset stale for %s (%s) — re-upload next tick",
                            pick.content.content_id, exc)
         return None
-    except (ticlawk.TiclawkAssetTooBig, ticlawk.TiclawkBadAssetType) as exc:
+    except (
+        ticlawk.TiclawkAssetTooBig,
+        ticlawk.TiclawkBadAssetType,
+        ticlawk.TiclawkWorkerResourceLimit,
+    ) as exc:
         # Hard rejection — fix-yourself client bug. Drop the asset entry so
         # we don't ship the bad ref again; video cache can be marked permanent.
         if payload.content_subtype == "gallery":

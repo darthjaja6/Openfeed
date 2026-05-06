@@ -237,6 +237,14 @@ class TiclawkQuotaExceeded(TiclawkError):
     exceeded. Caller should run cleanup (DELETE old assets) and retry."""
 
 
+class TiclawkWorkerResourceLimit(TiclawkError):
+    """`POST /api/cards` 546: Ticlawk worker could not process the upload.
+
+    In practice this has been caused by large multipart video cards that are
+    below OpenFeed's historical local cap but above Ticlawk's worker budget.
+    """
+
+
 def push_card(
     *,
     channel_id: str,
@@ -321,6 +329,8 @@ def push_card(
             raise TiclawkBadAssetType(str(exc), status=415, body=exc.body) from exc
         if exc.status == 403:
             raise TiclawkQuotaExceeded(str(exc), status=403, body=exc.body) from exc
+        if exc.status == 546:
+            raise TiclawkWorkerResourceLimit(str(exc), status=546, body=exc.body) from exc
         raise
     data = envelope.get("data") if isinstance(envelope, dict) else None
     if not isinstance(data, dict) or "id" not in data:
