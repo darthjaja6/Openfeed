@@ -19,6 +19,9 @@ time. Each tick:
      the item stays (with cache).
   6. **Checkpoint B**: atomic-rewrite `state/queue.json` with successful
      pushes removed.
+  7. Remove local mp4 cache files for successfully pushed YouTube/TikTok
+     videos that no longer remain active in queue. Ticlawk remote cleanup
+     stays in `cleanup_assets`.
 
 The whole render+push phase is bounded by `tick_budget_seconds` (default
 30s). Unfinished work stays in queue and will be picked again next tick
@@ -230,6 +233,87 @@ def _remove_from_queue(queue: Queue, item: QueueItem) -> None:
     topic = item.content.topic
     cid = item.content.content_id
     queue.topics[topic] = [qi for qi in queue.topics.get(topic, []) if qi.content.content_id != cid]
+
+
+def _queue_video_cache_ids(queue: Queue) -> set[str]:
+    ids: set[str] = set()
+    for items in queue.topics.values():
+        for qi in items:
+            if qi.content.platform == "youtube":
+                ids.add(qi.content.content_id)
+            elif (
+                qi.content.platform == "tiktok"
+                and qi.content.tiktok is not None
+                and qi.content.tiktok.media_kind == "video"
+            ):
+                ids.add(qi.content.content_id)
+    return ids
+
+
+def _pushed_video_cache_id(item: QueueItem) -> str | None:
+    payload = item.rendered_card
+    if payload is None or payload.content_subtype != "video":
+        return None
+    if item.content.platform == "youtube":
+        return item.content.content_id
+    if (
+        item.content.platform == "tiktok"
+        and item.content.tiktok is not None
+        and item.content.tiktok.media_kind == "video"
+    ):
+        return item.content.content_id
+    return None
+
+
+def _drop_pushed_local_video_cache(video_ids: list[str], queue: Queue) -> None:
+    """Delete local mp4 cache for pushed videos no longer active in queue.
+
+    This intentionally leaves Ticlawk asset/card indexes alone; remote
+    lifecycle cleanup remains owned by cleanup_assets.
+    """
+    if not video_ids or not _CACHE_INDEX_PATH.exists():
+        return
+    active_ids = _queue_video_cache_ids(queue)
+    targets = sorted({vid for vid in video_ids if vid not in active_ids})
+    if not targets:
+        return
+    try:
+        idx = VideoCacheIndex.model_validate(
+            json.loads(_CACHE_INDEX_PATH.read_text(encoding="utf-8"))
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("video_cache_index malformed; skip pushed local cleanup: %s", exc)
+        return
+
+    changed = False
+    freed = 0
+    dropped = 0
+    for video_id in targets:
+        entry = idx.videos.get(video_id)
+        if entry is None:
+            continue
+        if entry.local_path:
+            fp = Path(entry.local_path)
+            if fp.exists():
+                try:
+                    size = fp.stat().st_size
+                    fp.unlink()
+                    freed += size
+                except OSError as exc:
+                    logger.warning("local video cache unlink failed for %s: %s", video_id, exc)
+                    continue
+        idx.videos.pop(video_id, None)
+        changed = True
+        dropped += 1
+
+    if changed:
+        idx.generated_at = _utc_now_iso()
+        atomic_write_json(_CACHE_INDEX_PATH, idx.model_dump())
+        logger.info(
+            "dropped %d pushed local video cache entries (%.1f MB)",
+            dropped,
+            freed / 1e6,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +745,7 @@ def main(argv: list[str] | None = None) -> int:
     skipped_unrendered = 0
     skipped_backpressure = 0
     aborted_remaining = 0
+    pushed_video_cache_ids: list[str] = []
     for topic, topic_picks in picks_by_topic.items():
         spec = spec_by_topic[topic]
         cc = consumer_config_by_topic[topic]
@@ -699,6 +784,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             _append_history(entry)
             _remove_from_queue(queue, pick)
+            video_cache_id = _pushed_video_cache_id(pick)
+            if video_cache_id is not None:
+                pushed_video_cache_ids.append(video_cache_id)
             pushed_ok += 1
             logger.info("pushed [%s] %s / %s", pick.content.platform,
                         pick.content.topic, payload.title[:60])
@@ -707,6 +795,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ----- Checkpoint B: persist queue with successful pushes removed -----
     _save_queue(queue)
+    _drop_pushed_local_video_cache(pushed_video_cache_ids, queue)
     queue_size = sum(len(v) for v in queue.topics.values())
     logger.info(
         "push tick: %d ok / %d push-failed / %d unrendered / %d backpressure-skipped (queue now %d)",

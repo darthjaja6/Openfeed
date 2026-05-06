@@ -30,6 +30,8 @@ affected process.
 | `youtube.max_items_per_source` | 30 | opencli channel pull cap (~30 is YouTube's effective max) |
 | `x.max_items_per_source` | 20 | Same for X |
 | `web.max_items_per_source` | 100 | feedparser returns whatever the feed has |
+| `tiktok.max_items_per_source` | 30 | TikTok profile page size for both daily patrol and first-run source backfill |
+| `tiktok.backfill_max_pages` | 20 | Safety valve for first-run TikTok source backfill; freshness cutoff normally stops earlier |
 
 ## `filter`
 

@@ -202,6 +202,43 @@ def _filter_by_age(item: ContentItem, max_age_days: int | None) -> bool:
     return age <= max_age_days
 
 
+def _tiktok_age_days(media: tiktok_client.TikTokVideoMetadata) -> float | None:
+    now = datetime.now(timezone.utc)
+    if media.timestamp is not None:
+        try:
+            dt = datetime.fromtimestamp(media.timestamp, tz=timezone.utc)
+            return (now - dt).total_seconds() / 86400.0
+        except Exception:  # noqa: BLE001
+            return None
+    if media.upload_date:
+        try:
+            dt = datetime.strptime(media.upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
+            return (now - dt).total_seconds() / 86400.0
+        except ValueError:
+            return None
+    return None
+
+
+def _tiktok_is_stale(
+    media: tiktok_client.TikTokVideoMetadata,
+    max_age_days: int | None,
+) -> bool:
+    if max_age_days is None:
+        return False
+    age = _tiktok_age_days(media)
+    return age is not None and age > max_age_days
+
+
+def _tiktok_page_past_freshness(
+    page: list[tiktok_client.TikTokVideoMetadata],
+    max_age_days: int | None,
+) -> bool:
+    if not page or max_age_days is None:
+        return False
+    ages = [_tiktok_age_days(item) for item in page]
+    return all(age is not None and age > max_age_days for age in ages)
+
+
 def _patrol_youtube(
     source: SourceEntry, max_items: int,
     existing_ids: set[str], max_age_days: int | None,
@@ -362,43 +399,88 @@ def _patrol_tiktok(
     existing_ids: set[str],
     max_age_days: int | None,
     *,
+    backfill_max_pages: int,
     require_video_stream: bool,
     allow_photo: bool,
 ) -> list[ContentItem]:
-    recent = tiktok_client.tiktok_list_user_videos(source.source_id, limit=max_items)
+    page_size = max(1, max_items)
+    backfill = source.metadata.get("tiktok_backfilled_at") is None and max_age_days is not None
     stamp = _fetched_at_stamp()
     items: list[ContentItem] = []
     seen: set[str] = set()
-    for raw in recent:
-        media = raw
-        if not media.id or media.id in existing_ids or media.id in seen:
-            continue
-        seen.add(media.id)
-        if media.media_kind != "video" or not media.has_video_stream:
-            try:
-                media = tiktok_client.tiktok_probe_media(media.url)
-            except tiktok_client.TikTokYtDlpError as exc:
-                logger.info("tiktok patrol probe failed for %s/%s: %s", source.source_id, raw.id, exc)
-                continue
-        if media.media_kind == "video":
-            if require_video_stream and not media.has_video_stream:
-                continue
-        elif media.media_kind == "photo":
-            if not allow_photo or media.photo_count <= 0:
-                continue
-        else:
-            continue
-        item = ContentItem(
-            content_id=media.id,
-            source_id=source.source_id,
-            topic=source.topic,
-            platform="tiktok",
-            fetched_at=stamp,
-            source_of="patrol",
-            tiktok=_tiktok_digest(media),
+
+    max_pages = max(1, backfill_max_pages) if backfill else 1
+    if backfill:
+        logger.info(
+            "tiktok backfill @%s: page_size=%d max_pages=%d max_age_days=%s",
+            source.source_id,
+            page_size,
+            max_pages,
+            max_age_days,
         )
-        if _filter_by_age(item, max_age_days):
-            items.append(item)
+
+    for page_idx in range(max_pages):
+        start_index = page_idx * page_size + 1
+        recent = tiktok_client.tiktok_list_user_videos(
+            source.source_id,
+            limit=page_size,
+            start_index=start_index,
+            allow_empty=page_idx > 0,
+        )
+        if not recent:
+            break
+
+        for raw in recent:
+            media = raw
+            if not media.id or media.id in existing_ids or media.id in seen:
+                continue
+            seen.add(media.id)
+            if _tiktok_is_stale(media, max_age_days):
+                continue
+
+            if media.media_kind != "video" or not media.has_video_stream:
+                try:
+                    media = tiktok_client.tiktok_probe_media(media.url)
+                except tiktok_client.TikTokYtDlpError as exc:
+                    logger.info(
+                        "tiktok patrol probe failed for %s/%s: %s",
+                        source.source_id,
+                        raw.id,
+                        exc,
+                    )
+                    continue
+                if _tiktok_is_stale(media, max_age_days):
+                    continue
+
+            if media.media_kind == "video":
+                if require_video_stream and not media.has_video_stream:
+                    continue
+            elif media.media_kind == "photo":
+                if not allow_photo or media.photo_count <= 0:
+                    continue
+            else:
+                continue
+            item = ContentItem(
+                content_id=media.id,
+                source_id=source.source_id,
+                topic=source.topic,
+                platform="tiktok",
+                fetched_at=stamp,
+                source_of="patrol",
+                tiktok=_tiktok_digest(media),
+            )
+            if _filter_by_age(item, max_age_days):
+                items.append(item)
+
+        if not backfill or len(recent) < page_size:
+            break
+        if _tiktok_page_past_freshness(recent, max_age_days):
+            logger.info(
+                "tiktok backfill @%s stopped at page %d: page is outside freshness",
+                source.source_id,
+                page_idx + 1,
+            )
+            break
     return items
 
 
@@ -429,10 +511,19 @@ def _patrol_one(
             runtime.patrol.tiktok.max_items_per_source,
             existing_ids,
             max_age_days,
+            backfill_max_pages=runtime.patrol.tiktok.backfill_max_pages,
             require_video_stream=runtime.filter.tiktok.require_video_stream,
             allow_photo=runtime.filter.tiktok.allow_photo,
         )
     return []
+
+
+def _should_mark_tiktok_backfilled(source: SourceEntry, max_age_days: int | None) -> bool:
+    return (
+        source.platform == "tiktok"
+        and max_age_days is not None
+        and source.metadata.get("tiktok_backfilled_at") is None
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -602,7 +693,18 @@ def main(argv: list[str] | None = None) -> int:
                 _write_queue_item(item)
                 existing_ids.add(item.content_id)
                 n_new += 1
-            catalog.sources[source.catalog_key].last_patrolled_at = _utc_now_iso()
+            row = catalog.sources[source.catalog_key]
+            patrolled_at = _utc_now_iso()
+            row.last_patrolled_at = patrolled_at
+            if _should_mark_tiktok_backfilled(
+                source,
+                max_age_map.get((source.topic, source.platform)),
+            ):
+                row.metadata = dict(row.metadata)
+                row.metadata["tiktok_backfilled_at"] = patrolled_at
+                row.metadata["tiktok_backfill_page_size"] = (
+                    runtime.patrol.tiktok.max_items_per_source
+                )
 
     _save_catalog(catalog, touched_topics)
     if aborted:

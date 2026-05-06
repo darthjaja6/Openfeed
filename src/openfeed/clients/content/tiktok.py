@@ -255,17 +255,26 @@ def tiktok_list_user_videos(
     handle: str,
     *,
     limit: int = 10,
+    start_index: int = 1,
+    allow_empty: bool = False,
     timeout: int = 180,
 ) -> list[TikTokVideoMetadata]:
     """Return recent TikTok videos for `handle` using yt-dlp playlist metadata."""
     clean_handle = handle.strip().lstrip("@")
     if not clean_handle:
         raise TikTokYtDlpError("empty TikTok handle")
+    if limit <= 0:
+        raise TikTokYtDlpError("TikTok playlist limit must be positive")
+    if start_index <= 0:
+        raise TikTokYtDlpError("TikTok playlist start_index must be positive")
     url = f"https://www.tiktok.com/@{clean_handle}"
+    end_index = start_index + limit - 1
     cmd = _base_cmd() + [
         "--skip-download",
+        "--playlist-start",
+        str(start_index),
         "--playlist-end",
-        str(limit),
+        str(end_index),
         "--dump-json",
         url,
     ]
@@ -273,7 +282,7 @@ def tiktok_list_user_videos(
     items = [_normalize(item) for item in _json_lines(stdout)]
     videos = [item for item in items if item is not None]
     logger.info("tiktok playlist @%s: %d items in %.1fs", clean_handle, len(videos), elapsed)
-    if not videos:
+    if not videos and not allow_empty:
         raise TikTokYtDlpError(f"no TikTok videos returned for @{clean_handle}")
     return videos
 

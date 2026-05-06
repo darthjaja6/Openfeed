@@ -28,7 +28,8 @@ patrol:
   web:
     max_items_per_source: 100
   tiktok:
-    max_items_per_source: 2
+    max_items_per_source: 30
+    backfill_max_pages: 20
 filter:
   score_weights:
     popularity: 0.3

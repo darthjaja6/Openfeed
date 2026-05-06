@@ -76,6 +76,7 @@ class PatrolWeb(BaseModel):
 class PatrolTikTok(BaseModel):
     model_config = ConfigDict(extra="forbid")
     max_items_per_source: int
+    backfill_max_pages: int
 
 
 class PatrolConfig(BaseModel):
