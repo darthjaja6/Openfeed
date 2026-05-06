@@ -122,7 +122,7 @@ def _ios_compatibility_error(video: dict | None, audio: dict | None, target_heig
         )
     profile = video.get("profile")
     if profile not in _ALLOWED_H264_PROFILES:
-        return f"H.264 profile is {profile}, expected Main/High-compatible"
+        return f"H.264 profile is {profile}, expected Baseline/Main/High-compatible"
     if video.get("pix_fmt") != "yuv420p":
         return f"pixel format is {video.get('pix_fmt')}, expected yuv420p"
     level = video.get("level")
@@ -130,7 +130,9 @@ def _ios_compatibility_error(video: dict | None, audio: dict | None, target_heig
         return f"H.264 level is {level}, expected a positive level"
     if level > _MAX_IOS_H264_LEVEL:
         return f"H.264 level is {level / 10:.1f}, expected <= 4.1"
-    if audio is not None and audio.get("codec_name") != "aac":
+    if audio is None:
+        return "missing audio stream"
+    if audio.get("codec_name") != "aac":
         return f"audio codec is {audio.get('codec_name')}, expected aac"
     return None
 
@@ -172,7 +174,7 @@ def _remux_mp4_for_ios(
 
 
 def _ensure_ios_compatible(path: Path, *, target_height: int, timeout_seconds: int) -> None:
-    _, video, audio = _ffprobe(path)
+    _, video, _ = _ffprobe(path)
     if video is None:
         raise YouTubeDownloadPermanentError(
             f"iOS compatibility check failed for {path}: missing video stream",
@@ -182,7 +184,7 @@ def _ensure_ios_compatible(path: Path, *, target_height: int, timeout_seconds: i
     target_level = _REPAIRED_H264_LEVEL if isinstance(level, int) and level > _MAX_IOS_H264_LEVEL else None
     _remux_mp4_for_ios(path, target_level=target_level, timeout_seconds=timeout_seconds)
     _, repaired_video, repaired_audio = _ffprobe(path)
-    err = _ios_compatibility_error(repaired_video, repaired_audio or audio, target_height)
+    err = _ios_compatibility_error(repaired_video, repaired_audio, target_height)
     if err is not None:
         raise YouTubeDownloadPermanentError(
             f"iOS compatibility check failed for {path}: {err}",
