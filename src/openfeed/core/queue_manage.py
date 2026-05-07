@@ -168,11 +168,33 @@ def _emit_expired(qi: QueueItem, age: float, max_age: int) -> None:
     )
 
 
+def _source_diverse_order(items: list[QueueItem]) -> list[QueueItem]:
+    ranked = sorted(items, key=lambda qi: qi.rank_score, reverse=True)
+    by_source: dict[str, list[QueueItem]] = {}
+    for item in ranked:
+        by_source.setdefault(item.content.source_id, []).append(item)
+
+    out: list[QueueItem] = []
+    while by_source:
+        source_order = sorted(
+            by_source,
+            key=lambda source_id: by_source[source_id][0].rank_score,
+            reverse=True,
+        )
+        for source_id in source_order:
+            bucket = by_source.get(source_id)
+            if not bucket:
+                continue
+            out.append(bucket.pop(0))
+            if not bucket:
+                del by_source[source_id]
+    return out
+
+
 def _sort_topics(queue: Queue) -> None:
-    """In-place sort of each topic bucket by rank_score descending."""
+    """In-place canonical publish order for each topic bucket."""
     for topic, items in queue.topics.items():
-        items.sort(key=lambda qi: qi.rank_score, reverse=True)
-        queue.topics[topic] = items
+        queue.topics[topic] = _source_diverse_order(items)
 
 
 def _load_video_cache_index() -> VideoCacheIndex:

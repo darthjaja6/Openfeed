@@ -61,10 +61,7 @@ def _load_queue_status() -> QueueStatus | None:
     raw = _read_json(_QUEUE_STATUS_PATH)
     if raw is None:
         return None
-    try:
-        return QueueStatus.model_validate(raw)
-    except Exception:  # noqa: BLE001
-        return None
+    return QueueStatus.model_validate(raw)
 
 
 def _load_video_cache() -> VideoCacheIndex | None:
@@ -224,11 +221,10 @@ def main(argv: list[str] | None = None) -> int:
 
         status = _load_queue_status()
         if status is not None:
-            if status.total_pushable_inventory is not None:
-                print(
-                    "- pushable inventory: "
-                    f"{status.total_pushable_inventory}/{status.total_inventory}"
-                )
+            print(
+                "- pushable inventory: "
+                f"{status.total_pushable_inventory}/{status.total_inventory}"
+            )
             print(f"- refill topics: {status.refill_topics}")
 
         patrol_files = len(list(_PATROL_DIR.glob("*.json"))) if _PATROL_DIR.exists() else 0

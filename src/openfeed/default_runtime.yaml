@@ -65,8 +65,6 @@ queue_manage:
 push:
   target_buffer: 3
   max_per_tick: 3
-  same_source_gap: 2
-  top_k: 2
   producer: ticlawk
   tick_budget_seconds: 30
   render_workers: 4

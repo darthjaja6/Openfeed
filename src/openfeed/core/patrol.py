@@ -72,8 +72,7 @@ _QUEUE_STATUS_PATH = Path("state/queue_status.json")
 
 
 def _load_queue_status() -> QueueStatus | None:
-    """Read queue_manage's signal file. None = cold start (no file yet),
-    which makes patrol fall back to patrolling all active sources."""
+    """Read queue_manage's signal file. None = cold start (no file yet)."""
     if not _QUEUE_STATUS_PATH.exists():
         return None
     try:
@@ -81,8 +80,7 @@ def _load_queue_status() -> QueueStatus | None:
             json.loads(_QUEUE_STATUS_PATH.read_text(encoding="utf-8"))
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("queue_status.json malformed (%s) — treating as cold start", exc)
-        return None
+        raise RuntimeError("queue_status.json malformed; run queue_manage") from exc
 
 _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "

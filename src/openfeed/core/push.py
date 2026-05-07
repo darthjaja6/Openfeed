@@ -5,8 +5,8 @@ time. Each tick:
 
   1. Read channel metrics → `to_push = max(0, target_buffer - unconsumed_total)`
      (capped by `max_per_tick`). Zero means user's feed is full; sleep.
-  2. Pick that many candidates with weighted-random by topic + spacing
-     constraints against `history.jsonl` and the in-tick selections.
+  2. For each topic with a gap, scan the canonical queue order and pick the
+     first media-ready items.
   3. **Render phase** (parallel, `render_workers` threads): for items with
      `rendered_card is None`, call `producer.render`. Items already cached
      skip this. Mutates `QueueItem.rendered_card` in place.
@@ -32,7 +32,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import random
 import sys
 import time
 from collections import Counter
@@ -71,7 +70,6 @@ _IMAGE_ASSET_INDEX_PATH = Path("state/image_assets.json")
 _CACHE_INDEX_PATH = Path("state/video_cache_index.json")
 _IMAGE_CACHE_INDEX_PATH = Path("state/image_cache_index.json")
 _DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 15 * 60
-_DEFAULT_SPACING_HISTORY_ROWS = 500
 
 
 # ---------------------------------------------------------------------------
@@ -119,20 +117,6 @@ def _load_image_cache_index() -> ImageCacheIndex:
     )
 
 
-def _read_recent_history(n: int) -> list[HistoryEntry]:
-    if not _HISTORY_PATH.exists():
-        return []
-    lines = [line for line in _HISTORY_PATH.read_text(encoding="utf-8").split("\n") if line.strip()]
-    recent = lines[-n:] if n > 0 else lines
-    out: list[HistoryEntry] = []
-    for line in recent:
-        try:
-            out.append(HistoryEntry.model_validate_json(line))
-        except Exception:  # noqa: BLE001 — one bad line doesn't abort the tick
-            continue
-    return out
-
-
 def _append_history(entry: HistoryEntry) -> None:
     _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _HISTORY_PATH.open("a", encoding="utf-8") as f:
@@ -157,96 +141,14 @@ def _unconsumed_from_metrics(metrics: dict) -> int | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Selection
-# ---------------------------------------------------------------------------
-
-
-def _source_diverse_top_pool(pool: list[QueueItem], limit: int) -> list[QueueItem]:
-    """Return up to `limit` queue-order-preserving source heads.
-
-    Queue is already sorted by rank_score. Taking only the first item per
-    source before sampling prevents one source with many adjacent high-rank
-    items from occupying the whole stochastic top-k window.
-    """
-    if limit <= 0:
-        limit = 1
-    out: list[QueueItem] = []
-    seen_sources: set[str] = set()
-    for qi in pool:
-        source_id = qi.content.source_id
-        if source_id in seen_sources:
-            continue
-        out.append(qi)
-        seen_sources.add(source_id)
-        if len(out) >= limit:
-            break
-    return out or pool[:limit]
-
-
 def _pick_for_topic(
     items: list[QueueItem],
-    recent_topic_history: list[HistoryEntry],
-    cfg: PushConfig,
     n: int,
-    exclude_cids: set[str],
 ) -> list[QueueItem]:
-    """Pick up to `n` items from a single topic's queue, respecting
-    `same_source_gap` (don't push two cards from the same source within
-    the last N pushes of THIS topic).
-
-    Items already in `exclude_cids` are skipped — used to avoid in-tick
-    duplicates if caller picks across multiple topics in one pass.
-
-    Caller should pass `recent_topic_history` already filtered to this
-    topic. Per-channel spacing is what matters now (same source could
-    legitimately appear in different channels back-to-back from the
-    user's per-channel-feed perspective).
-    """
-    candidates = [qi for qi in items if qi.content.content_id not in exclude_cids]
-    if not candidates or n <= 0:
+    """Pick up to `n` items from the canonical queue order."""
+    if n <= 0:
         return []
-
-    last_sources: list[str] = (
-        [h.source_id for h in recent_topic_history[-cfg.same_source_gap:]]
-        if cfg.same_source_gap > 0 else []
-    )
-
-    picks: list[QueueItem] = []
-    used_cids: set[str] = set()
-    used_sources: list[str] = list(last_sources)
-    while len(picks) < n:
-        available = [
-            qi for qi in candidates
-            if qi.content.content_id not in used_cids
-        ]
-        if not available:
-            break
-
-        pool = available
-        if cfg.same_source_gap > 0:
-            blocked_sources = set(used_sources[-cfg.same_source_gap:])
-            pool = [
-                qi for qi in available
-                if qi.content.source_id not in blocked_sources
-            ]
-        if not pool:
-            # All remaining candidates are inside the source gap. We still
-            # push rather than stalling, but keep the source-head sampling
-            # below so fallback does not blindly pick adjacent same-source
-            # items when multiple blocked sources exist.
-            logger.info(
-                "same-source spacing exhausted for topic=%s; using blocked source pool",
-                candidates[0].content.topic,
-            )
-            pool = available
-
-        top_k_pool = _source_diverse_top_pool(pool, cfg.top_k)
-        chosen = random.choice(top_k_pool)
-        picks.append(chosen)
-        used_cids.add(chosen.content.content_id)
-        used_sources.append(chosen.content.source_id)
-    return picks
+    return items[:n]
 
 
 def _remove_from_queue(queue: Queue, item: QueueItem) -> None:
@@ -709,20 +611,13 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("no topic needs pushing this tick")
         return 0
 
-    # ----- Phase 2: per-topic pick selection (source-spacing per topic) -----
-    # Spacing is per topic/channel, but history is global. Read a deeper
-    # global slice so other active topics cannot evict the target topic's
-    # own recent pushes from the spacing window.
-    recent_all = _read_recent_history(
-        max(cfg.same_source_gap + 5, _DEFAULT_SPACING_HISTORY_ROWS)
-    )
+    # ----- Phase 2: per-topic pick selection from canonical queue order -----
     video_cache_idx = _load_video_cache_index()
     image_cache_idx = _load_image_cache_index()
     picks_by_topic: dict[str, list[QueueItem]] = {}
     all_picks: list[QueueItem] = []
     media_state_dirty = False
     for topic, n in to_push_by_topic.items():
-        topic_recent = [h for h in recent_all if h.topic == topic]
         topic_items: list[QueueItem] = []
         skipped_reasons: Counter[str] = Counter()
         stale_rendered = 0
@@ -747,9 +642,7 @@ def main(argv: list[str] | None = None) -> int:
                 dict(skipped_reasons),
                 stale_rendered,
             )
-        topic_picks = _pick_for_topic(
-            topic_items, topic_recent, cfg, n, exclude_cids=set(),
-        )
+        topic_picks = _pick_for_topic(topic_items, n)
         if topic_picks:
             picks_by_topic[topic] = topic_picks
             all_picks.extend(topic_picks)

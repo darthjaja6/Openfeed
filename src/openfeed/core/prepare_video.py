@@ -9,16 +9,16 @@ push time and get another shot next tick — no blocking.
 
 Each tick:
   1. Load queue.json + state/video_cache_index.json.
-  2. Build a small source-diverse working set per topic. The local media
-     cache serves this near-term push window, not the whole queue.
+  2. Read the canonical per-topic queue order produced by queue_manage.
+     The local media cache serves this near-term push window, not the whole queue.
   3. Find native video cards in that working set whose content_id is either:
        - not in the index yet (never tried)
        - in `failed` state past the backoff window
      `permanently_failed` and `ready` videos are skipped.
   4. If the local cache is already at/over the configured cap at tick start,
-     evict ready mp4s outside the current working set. Otherwise pick top N (`max_per_tick`);
-     run yt-dlp in parallel up to `max_concurrent`, bounded by
-     `tick_budget_seconds`.
+     evict ready mp4s outside the current working set. Otherwise pick top N
+     (`max_per_tick`) by topic demand, preserving queue order within each topic;
+     run yt-dlp in parallel up to `max_concurrent`, bounded by `tick_budget_seconds`.
   5. Per result: write file to `state/video_cache/<vid>.mp4`, update
      index entry to `ready` (or bump failure_count and set `failed` /
      `permanently_failed`).
@@ -54,7 +54,7 @@ from openfeed.clients.content.youtube_download import (
     download as yt_download,
 )
 from openfeed.models.image_cache import ImageCacheEntry, ImageCacheIndex
-from openfeed.models.queue import Queue
+from openfeed.models.queue import Queue, QueueStatus
 from openfeed.models.runtime import (
     TikTokImageDownloadConfig,
     TikTokDownloadConfig,
@@ -72,6 +72,7 @@ from openfeed.utils.state_io import atomic_write_json
 logger = logging.getLogger("prepare_video")
 
 _QUEUE_PATH = Path("state/queue.json")
+_QUEUE_STATUS_PATH = Path("state/queue_status.json")
 _INDEX_PATH = Path("state/video_cache_index.json")
 _CACHE_DIR = Path("state/video_cache")
 _IMAGE_INDEX_PATH = Path("state/image_cache_index.json")
@@ -105,6 +106,14 @@ def _load_queue() -> Queue:
     if not _QUEUE_PATH.exists():
         return Queue(generated_at=_utc_now_iso(), topics={})
     return Queue.model_validate(json.loads(_QUEUE_PATH.read_text(encoding="utf-8")))
+
+
+def _load_queue_status() -> QueueStatus | None:
+    if not _QUEUE_STATUS_PATH.exists():
+        return None
+    return QueueStatus.model_validate(
+        json.loads(_QUEUE_STATUS_PATH.read_text(encoding="utf-8"))
+    )
 
 
 def _load_index() -> VideoCacheIndex:
@@ -206,26 +215,34 @@ def _evict_ready_videos_outside_working_set(
 # ---------------------------------------------------------------------------
 
 
-def _source_diverse_window(items: list, limit: int) -> list:
-    if limit <= 0:
-        limit = 1
-    out: list = []
-    seen_sources: set[str] = set()
-    for item in items:
-        source_id = item.content.source_id
-        if source_id in seen_sources:
-            continue
-        out.append(item)
-        seen_sources.add(source_id)
-        if len(out) >= limit:
-            return out
-    for item in items:
-        if item in out:
-            continue
-        out.append(item)
-        if len(out) >= limit:
-            return out
-    return out
+def _topic_priority(topic: str, status: QueueStatus | None) -> tuple[int, int, int, int]:
+    if status is None:
+        return (0, 0, 0, 0)
+    topic_status = status.per_topic.get(topic)
+    if topic_status is None:
+        return (0, 0, 0, 0)
+    pushable = topic_status.pushable_inventory
+    blocked = topic_status.blocked_inventory
+    if pushable == 0 and topic_status.refill_gap > 0:
+        tier = 3
+    elif topic_status.refill_gap > 0:
+        tier = 2
+    elif blocked > 0:
+        tier = 1
+    else:
+        tier = 0
+    return (tier, topic_status.refill_gap, -pushable, blocked)
+
+
+def _ordered_topics(topics: list[str], status: QueueStatus | None) -> list[str]:
+    def sort_key(topic: str) -> tuple[int, int, int, int, str]:
+        tier, gap, neg_pushable, blocked = _topic_priority(topic, status)
+        return (-tier, -gap, -neg_pushable, -blocked, topic)
+
+    return sorted(
+        topics,
+        key=sort_key,
+    )
 
 
 def _video_url(qi, platform: str) -> str:
@@ -263,7 +280,7 @@ def _video_working_set(
         if topic_filter is not None and topic != topic_filter:
             continue
         media_items = _video_items_for_platform(items, platform)
-        out.extend(_source_diverse_window(media_items, cfg.ready_target_per_topic))
+        out.extend(media_items[:cfg.ready_target_per_topic])
     return out
 
 
@@ -290,14 +307,13 @@ def _candidates(
 ) -> list[tuple[str, str, float]]:
     """Return list of (content_id, url, rank_score) eligible this tick.
 
-    Topic-fair round-robin: takes top-N per topic by rank_score, then
-    interleaves so a high-volume topic doesn't starve smaller topics out
-    of the cache. push uses weighted-random topic selection, so it expects
-    every topic to have SOME cached items — pure global-rank selection
-    leaves low-volume topics with 0 cache and stalls push.
+    Queue order is already source-diverse inside each topic. prepare keeps
+    that order, then interleaves topics by queue_status demand so topics with
+    zero pushable media get download budget first.
     """
     backoff = timedelta(minutes=cfg.failure_backoff_minutes)
     now = _utc_now()
+    status = _load_queue_status()
     by_topic: dict[str, dict[str, tuple[str, float]]] = {}
     for topic, items in queue.topics.items():
         if topic_filter is not None and topic != topic_filter:
@@ -323,29 +339,29 @@ def _candidates(
                         continue
             eligible_items.append(qi)
         slot = by_topic.setdefault(topic, {})
-        for qi in _source_diverse_window(eligible_items, cfg.ready_target_per_topic):
+        for qi in eligible_items[:cfg.ready_target_per_topic]:
             content_id = qi.content.content_id
             url = _video_url(qi, platform)
             existing = slot.get(content_id)
             if existing is None or qi.rank_score > existing[1]:
                 slot[content_id] = (url, qi.rank_score)
     by_topic = {topic: slot for topic, slot in by_topic.items() if slot}
-    # Sort each topic's videos by rank_score desc.
     per_topic_sorted = {
-        topic: sorted(
-            ((content_id, url, score) for content_id, (url, score) in vids.items()),
-            key=lambda x: -x[2],
-        )
+        topic: [
+            (content_id, url, score)
+            for content_id, (url, score) in vids.items()
+        ]
         for topic, vids in by_topic.items() if vids
     }
     # Interleave: round 0 takes #1 from each topic, round 1 takes #2, etc.
-    # Within a round, topics are visited in alphabetical order (deterministic).
+    # Within a round, topics are visited by demand priority from queue_status.
     out: list[tuple[str, str, float]] = []
     if not per_topic_sorted:
         return out
     max_depth = max(len(lst) for lst in per_topic_sorted.values())
+    topics = _ordered_topics(list(per_topic_sorted.keys()), status)
     for depth in range(max_depth):
-        for topic in sorted(per_topic_sorted.keys()):
+        for topic in topics:
             lst = per_topic_sorted[topic]
             if depth < len(lst):
                 out.append(lst[depth])
@@ -362,6 +378,7 @@ def _image_candidates(
     """Return (content_id, image_urls, referer, rank_score) for TikTok photos."""
     backoff = timedelta(minutes=cfg.failure_backoff_minutes)
     now = _utc_now()
+    status = _load_queue_status()
     by_topic: dict[str, dict[str, tuple[list[str], str, float]]] = {}
     for topic, items in queue.topics.items():
         if topic_filter is not None and topic != topic_filter:
@@ -375,7 +392,7 @@ def _image_candidates(
                 and qi.content.tiktok.media_kind == "photo"
             )
         ]
-        for qi in _source_diverse_window(media_items, cfg.ready_target_per_topic):
+        for qi in media_items[:cfg.ready_target_per_topic]:
             content_id = qi.content.content_id
             urls = [u for u in qi.content.tiktok.photo_image_urls if u]
             if not urls:
@@ -399,18 +416,19 @@ def _image_candidates(
         if slot:
             by_topic[topic] = slot
     per_topic_sorted = {
-        topic: sorted(
-            ((content_id, urls, referer, score) for content_id, (urls, referer, score) in items.items()),
-            key=lambda x: -x[3],
-        )
+        topic: [
+            (content_id, urls, referer, score)
+            for content_id, (urls, referer, score) in items.items()
+        ]
         for topic, items in by_topic.items() if items
     }
     out: list[tuple[str, list[str], str, float]] = []
     if not per_topic_sorted:
         return out
     max_depth = max(len(lst) for lst in per_topic_sorted.values())
+    topics = _ordered_topics(list(per_topic_sorted.keys()), status)
     for depth in range(max_depth):
-        for topic in sorted(per_topic_sorted.keys()):
+        for topic in topics:
             lst = per_topic_sorted[topic]
             if depth < len(lst):
                 out.append(lst[depth])

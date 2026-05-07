@@ -63,11 +63,13 @@ affected process.
 |---|---|---|
 | `target_buffer` | 3 | Push until producer's unconsumed count ≥ this |
 | `max_per_tick` | 3 | Safety cap per tick |
-| `same_source_gap` | 2 | Last N pushes can't share source (spacing) |
-| `top_k` | 2 | Sample from top-K by rank_score within chosen topic |
 | `producer` | `"ticlawk"` | Card producer name (currently only `ticlawk`) |
 | `tick_budget_seconds` | 30 | Wall-clock cap for render+push per tick |
 | `render_workers` | 4 | Render threadpool size for lazy render |
+
+Source diversity is applied by `queue_manage` when it creates the canonical
+per-topic queue order. `push` scans that order and does not run a second
+source-spacing scheduler.
 
 ## `refill_cycle`
 

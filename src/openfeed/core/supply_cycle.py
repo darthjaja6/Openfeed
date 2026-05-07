@@ -171,13 +171,10 @@ def _bootstrap_missing(_argv: list[str] | None = None) -> int:
 
 
 def _load_queue_status() -> QueueStatus | None:
-    raw = _load_json(Path("state/queue_status.json"))
-    if not raw:
+    path = Path("state/queue_status.json")
+    if not path.exists():
         return None
-    try:
-        return QueueStatus.model_validate(raw)
-    except Exception:  # noqa: BLE001
-        return None
+    return QueueStatus.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
 
 def _seconds_since(iso_value: str | None) -> float | None:

@@ -38,8 +38,8 @@ class TopicStatus(BaseModel):
     """Inventory snapshot for one topic, produced by queue_manage."""
     model_config = ConfigDict(extra="forbid")
     inventory: int          # current count after expiration/resort
-    pushable_inventory: int | None = None  # currently pushable without waiting for media prep
-    blocked_inventory: int | None = None   # queued but not pushable yet
+    pushable_inventory: int  # currently pushable without waiting for media prep
+    blocked_inventory: int   # queued but not pushable yet
     target: int             # per-topic target (max(floor, topic_capacity))
     refill_gap: int         # max(0, target - pushable_inventory); ≥1 → refill signal
     floor: int              # floor that applied (copied from runtime)
@@ -54,7 +54,7 @@ class QueueStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
     generated_at: str
     total_inventory: int
-    total_pushable_inventory: int | None = None
+    total_pushable_inventory: int
     topic_capacity: int
     per_topic: dict[str, TopicStatus]
     # Topics with refill_gap > 0, ordered gap-desc. Patrol should prefer

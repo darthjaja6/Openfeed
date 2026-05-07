@@ -166,14 +166,7 @@ class PushConfig(BaseModel):
     at single-user scale.
     `max_per_tick` — safety cap; refuse to push more than this per tick even
     if the gap is larger (protects against a sudden buffer wipe).
-    `same_source_gap` — consult the last N pushes in history.jsonl
-    (filtered to this topic); skip candidates from the same source within
-    the window. (`same_topic_gap` was removed when push moved to
-    per-channel routing — same-topic spacing is implicit when each topic
-    pushes to its own channel.)
-    `top_k` — size of the source-diverse head pool we sample from within a
-    chosen topic. Queue order still follows admit-time rank_score, but only
-    one leading candidate per source enters the stochastic window.
+    Source diversity belongs to queue_manage's canonical queue order.
     `producer` — name of the card producer under `card_producers/<name>/`.
     `tick_budget_seconds` — wall-clock cap covering render + ticlawk push for
     the whole tick. Anything not finished stays in queue for the next tick.
@@ -183,8 +176,6 @@ class PushConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_buffer: int
     max_per_tick: int
-    same_source_gap: int
-    top_k: int
     producer: str
     tick_budget_seconds: int
     render_workers: int
