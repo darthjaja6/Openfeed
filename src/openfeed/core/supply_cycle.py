@@ -9,12 +9,12 @@ orchestrator just calls their `main()` in sequence and honours the outer
 sleep cadence. If a step returns non-zero, we stop the current cycle (per
 §3.7 "依赖挂了不试图往下走"); next cycle's tick will retry.
 
-The `bootstrap_missing` step picks ONE missing (topic, platform) slot per tick,
-seeds keywords for that slot, then runs scoped discover. This lets a new
-platform be added to an existing topic without rebuilding the rest of the
-topic. `starvation_discover` is a bounded escalation for topics with zero
-pushable inventory; it runs at most one scoped topic discover per tick and
-backs off per topic.
+The `bootstrap_missing` step picks ONE source-missing (topic, platform) slot
+per tick, seeds keywords if that slot has none, then runs scoped discover.
+This lets a new platform be added to an existing topic without rebuilding the
+rest of the topic. `starvation_discover` is a bounded escalation for topics
+with zero pushable inventory; it runs at most one scoped topic discover per
+tick and backs off per topic.
 """
 from __future__ import annotations
 
@@ -86,11 +86,25 @@ def _active_source_counts(workdir: Path) -> dict[tuple[str, str], int]:
     return counts
 
 
-def _bootstrap_missing(_argv: list[str] | None = None) -> int:
-    """Bootstrap one missing (topic, platform) slot per tick.
+def _topic_demand_priority(status: QueueStatus | None, topic: str) -> tuple[int, int]:
+    if status is None:
+        return (2, 0)
+    topic_status = status.per_topic.get(topic)
+    if topic_status is None:
+        return (2, 0)
+    if topic_status.refill_gap > 0 and topic_status.pushable_inventory == 0:
+        return (0, -topic_status.refill_gap)
+    if topic_status.refill_gap > 0:
+        return (1, -topic_status.refill_gap)
+    return (2, 0)
 
-    A slot is missing when it has no keywords or no active sources. This keeps
-    adding TikTok to an existing YouTube topic scoped to the new platform.
+
+def _bootstrap_missing(_argv: list[str] | None = None) -> int:
+    """Bootstrap one source-missing (topic, platform) slot per tick.
+
+    A slot needs bootstrap when it has no active sources. Missing keywords for
+    a slot that already has active sources is bookkeeping, not a reason to run
+    full discover ahead of a topic that cannot currently produce content.
 
     Returns 0 always (no work needed = success). When work is needed and
     discover fails, logs and returns 0 anyway — we don't want a transient
@@ -103,46 +117,73 @@ def _bootstrap_missing(_argv: list[str] | None = None) -> int:
     keywords_path = workdir / "state" / "search_terms.json"
     existing = _load_json(keywords_path)
     active_counts = _active_source_counts(workdir)
-    missing = sorted(
-        (entry.topic, platform)
-        for entry in config.interests
-        for platform in entry.platforms
-        if not _search_terms_for_slot(existing, entry.topic, platform)
-        or active_counts.get((entry.topic, platform), 0) == 0
-    )
-    if not missing:
+    queue_status = _load_queue_status()
+    source_missing: list[tuple[tuple[int, int], int, str, str, int]] = []
+    keyword_only: list[str] = []
+    slot_index = 0
+    for entry in config.interests:
+        for platform in entry.platforms:
+            keywords = _search_terms_for_slot(existing, entry.topic, platform)
+            active_count = active_counts.get((entry.topic, platform), 0)
+            if active_count == 0:
+                source_missing.append((
+                    _topic_demand_priority(queue_status, entry.topic),
+                    slot_index,
+                    entry.topic,
+                    platform,
+                    len(keywords),
+                ))
+            elif not keywords:
+                keyword_only.append(_slot_key(entry.topic, platform))
+            slot_index += 1
+
+    if not source_missing:
+        if keyword_only:
+            logger.info(
+                "bootstrap_missing: ignoring %d keyword-only slot(s) with active sources: %s",
+                len(keyword_only),
+                keyword_only,
+            )
         return 0
-    target_name, target_platform = missing[0]
+    source_missing.sort()
+    _, _, target_name, target_platform, keyword_count = source_missing[0]
     target_entry = next(t for t in config.interests if t.topic == target_name)
     logger.info(
-        "bootstrap_missing: %d missing slot(s); doing %s/%s this tick (rest: %s)",
-        len(missing),
+        "bootstrap_missing: %d source-missing slot(s); doing %s/%s this tick (rest: %s; keyword-only skipped: %s)",
+        len(source_missing),
         target_name,
         target_platform,
-        [_slot_key(t, p) for t, p in missing[1:]] or "—",
+        [_slot_key(t, p) for _, _, t, p, _ in source_missing[1:]] or "—",
+        keyword_only or "—",
     )
 
     # ----- step 1: scoped LLM keyword seed (mirrors tmp/scoped_seed_*.py) -----
-    runner = GeminiRunner(workdir)
-    persona = PersonaOutput.model_validate(config.persona)
-    sliced = InterestsConfig(persona=config.persona, interests=[target_entry])
-    new_keywords = generate_keywords_per_platform(
-        sliced, persona, [], runner,
-        only_slots={(target_name, target_platform)},
-    )
-    merged = merge_search_terms(config, existing, new_keywords)
-    atomic_write_json(keywords_path, merged)
-    n_kw = len(
-        (merged.get("topics") or {})
-        .get(target_name, {})
-        .get(target_platform, {})
-        .get("keywords")
-        or []
-    )
-    logger.info(
-        "bootstrap_missing: seeded %d keywords for %s/%s",
-        n_kw, target_name, target_platform,
-    )
+    if keyword_count == 0:
+        runner = GeminiRunner(workdir)
+        persona = PersonaOutput.model_validate(config.persona)
+        sliced = InterestsConfig(persona=config.persona, interests=[target_entry])
+        new_keywords = generate_keywords_per_platform(
+            sliced, persona, [], runner,
+            only_slots={(target_name, target_platform)},
+        )
+        merged = merge_search_terms(config, existing, new_keywords)
+        atomic_write_json(keywords_path, merged)
+        keyword_count = len(
+            (merged.get("topics") or {})
+            .get(target_name, {})
+            .get(target_platform, {})
+            .get("keywords")
+            or []
+        )
+        logger.info(
+            "bootstrap_missing: seeded %d keywords for %s/%s",
+            keyword_count, target_name, target_platform,
+        )
+    else:
+        logger.info(
+            "bootstrap_missing: %s/%s already has %d keywords",
+            target_name, target_platform, keyword_count,
+        )
 
     # ----- step 2: scoped discover for that slot -----
     logger.info(
