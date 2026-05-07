@@ -163,6 +163,54 @@ def archive_topic(state_dir: Path, topic: str, target: Path) -> bool:
         return True
 
 
+def archive_topic_platform(
+    state_dir: Path,
+    topic: str,
+    platform: str,
+    target: Path,
+) -> int:
+    """Remove one platform's sources from a topic catalog file.
+
+    Returns the number of archived sources. Other platform rows in the same
+    topic file remain active.
+    """
+    path = topic_path(state_dir, topic)
+    with _topic_file_lock(state_dir, topic):
+        if not path.exists():
+            return 0
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            cat = SourceCatalog.model_validate(raw)
+        except Exception:
+            return 0
+        removed = {
+            entry.catalog_key: entry
+            for entry in cat.sources.values()
+            if entry.platform == platform
+        }
+        if not removed:
+            return 0
+        kept = {
+            entry.catalog_key: entry
+            for entry in cat.sources.values()
+            if entry.platform != platform
+        }
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                SourceCatalog(generated_at=_utc_now_iso(), sources=removed).model_dump(),
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        _atomic_write_json(
+            path,
+            SourceCatalog(generated_at=_utc_now_iso(), sources=kept).model_dump(),
+        )
+        return len(removed)
+
+
 def save_catalog(state_dir: Path, catalog: SourceCatalog) -> None:
     """Write the merged in-memory catalog back as per-topic files.
 

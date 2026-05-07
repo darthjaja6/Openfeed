@@ -35,6 +35,7 @@ import logging
 import random
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,7 @@ from openfeed.models.video_cache import VideoCacheIndex
 from openfeed.utils import backpressure
 from openfeed.utils import cycle_summary
 from openfeed.utils.logging_setup import configure_task_logging
+from openfeed.utils.media_readiness import queue_item_media_readiness
 from openfeed.utils.state_io import atomic_write_json
 
 
@@ -180,63 +182,6 @@ def _source_diverse_top_pool(pool: list[QueueItem], limit: int) -> list[QueueIte
         if len(out) >= limit:
             break
     return out or pool[:limit]
-
-
-def _paths_exist(paths: list[str] | None) -> bool:
-    return bool(paths) and all(Path(p).exists() for p in paths)
-
-
-def _rendered_card_local_media_ready(item: QueueItem) -> bool:
-    payload = item.rendered_card
-    if payload is None:
-        return False
-    if payload.content_subtype == "video":
-        return bool(payload.video_path) and Path(payload.video_path).exists()
-    if payload.content_subtype == "gallery":
-        return _paths_exist(payload.image_paths)
-    return True
-
-
-def _video_cache_ready(video_idx: VideoCacheIndex, content_id: str) -> bool:
-    entry = video_idx.videos.get(content_id)
-    return (
-        entry is not None
-        and entry.state == "ready"
-        and bool(entry.local_path)
-        and Path(entry.local_path).exists()
-    )
-
-
-def _image_cache_ready(image_idx: ImageCacheIndex, content_id: str) -> bool:
-    entry = image_idx.images.get(content_id)
-    return (
-        entry is not None
-        and entry.state == "ready"
-        and _paths_exist(entry.image_paths)
-    )
-
-
-def _queue_item_media_ready(
-    item: QueueItem,
-    video_idx: VideoCacheIndex,
-    image_idx: ImageCacheIndex,
-) -> bool:
-    content = item.content
-    if item.rendered_card is not None:
-        if _rendered_card_local_media_ready(item):
-            return True
-        item.rendered_card = None
-    if content.platform == "youtube":
-        return _video_cache_ready(video_idx, content.content_id)
-    if content.platform == "tiktok":
-        if content.tiktok is None:
-            return False
-        if content.tiktok.media_kind == "video":
-            return _video_cache_ready(video_idx, content.content_id)
-        if content.tiktok.media_kind == "photo":
-            return _image_cache_ready(image_idx, content.content_id)
-        return False
-    return True
 
 
 def _pick_for_topic(
@@ -775,14 +720,33 @@ def main(argv: list[str] | None = None) -> int:
     image_cache_idx = _load_image_cache_index()
     picks_by_topic: dict[str, list[QueueItem]] = {}
     all_picks: list[QueueItem] = []
+    media_state_dirty = False
     for topic, n in to_push_by_topic.items():
         topic_recent = [h for h in recent_all if h.topic == topic]
-        topic_items = [
-            qi for qi in queue.topics[topic]
-            if _queue_item_media_ready(qi, video_cache_idx, image_cache_idx)
-        ]
+        topic_items: list[QueueItem] = []
+        skipped_reasons: Counter[str] = Counter()
+        stale_rendered = 0
+        for qi in queue.topics[topic]:
+            state = queue_item_media_readiness(qi, video_cache_idx, image_cache_idx)
+            if state.stale_rendered_card:
+                qi.rendered_card = None
+                stale_rendered += 1
+                media_state_dirty = True
+            if state.ready:
+                topic_items.append(qi)
+            else:
+                skipped_reasons[state.reason] += 1
         if skip_youtube and consumer_type_by_topic.get(topic) == "ticlawk":
             topic_items = [qi for qi in topic_items if qi.content.platform != "youtube"]
+        if skipped_reasons or stale_rendered:
+            logger.info(
+                "[%s] media-ready candidates=%d/%d; skipped=%s; cleared_stale_rendered=%d",
+                topic,
+                len(topic_items),
+                len(queue.topics[topic]),
+                dict(skipped_reasons),
+                stale_rendered,
+            )
         topic_picks = _pick_for_topic(
             topic_items, topic_recent, cfg, n, exclude_cids=set(),
         )
@@ -791,6 +755,8 @@ def main(argv: list[str] | None = None) -> int:
             all_picks.extend(topic_picks)
 
     if not all_picks:
+        if media_state_dirty:
+            _save_queue(queue)
         logger.info("no eligible items across topics — stopping")
         return 0
     logger.info(

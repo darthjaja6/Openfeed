@@ -5,15 +5,21 @@ from common failures.
 
 ## Running daemons
 
-Two daemons make up the live system:
+Three foreground jobs make up the live system:
 
 - **supply cycle** (`openfeed-supply-cycle`): patrol → filter →
-  queue_manage → prepare_video → cleanup_assets. Default interval 15 min.
+  queue_manage → cleanup_assets. Default interval 15 min.
+- **prepare media** (`openfeed-prepare-video`): keeps queued native video and
+  image media ready in the local working set.
 - **refill cycle** (`openfeed-refill-cycle`): push → collect_feedback →
   learn. Default interval 30 sec.
 
 `openfeed-discover` is a one-shot — invoke manually when you want to
 expand the source pool (or schedule it weekly).
+
+The installed `openfeed` command is the recommended wrapper. It only resolves
+the instance paths and starts the existing entrypoints; it does not replace the
+engine modules.
 
 ### Recommended: cron
 
@@ -21,14 +27,17 @@ cron restarts each tick with a clean process. No drift, no leaked file
 descriptors, no surprise hangs from a long-running interpreter.
 
 ```cron
-# Supply: every 15 min — patrol + filter + queue + downloads + cleanup
-*/15 * * * * OPENFEED_WORKDIR=/path/to/openfeed-instance OPENFEED_VENV=/path/to/openfeed-instance/.venv /path/to/openfeed/scripts/openfeed-cron-run supply
+# Supply: every 15 min — patrol + filter + queue + cleanup
+*/15 * * * * openfeed --instance /path/to/openfeed-instance supply
 
 # Refill: every minute — push + collect_feedback + learn
-* * * * * OPENFEED_WORKDIR=/path/to/openfeed-instance OPENFEED_VENV=/path/to/openfeed-instance/.venv /path/to/openfeed/scripts/openfeed-cron-run refill
+* * * * * openfeed --instance /path/to/openfeed-instance refill
+
+# Prepare: every minute — keep local media ready for push
+* * * * * openfeed --instance /path/to/openfeed-instance prepare
 
 # Optional weekly discover (fresh source pool)
-0 3 * * 1 OPENFEED_WORKDIR=/path/to/openfeed-instance OPENFEED_VENV=/path/to/openfeed-instance/.venv /path/to/openfeed/scripts/openfeed-cron-run discover
+0 3 * * 1 openfeed --instance /path/to/openfeed-instance discover
 ```
 
 (The default refill interval is 30s in `--loop` mode, but cron's minimum
@@ -40,12 +49,11 @@ is 1 min — that's fine for most users; bump cron to a `while true; do
 Quick for development:
 
 ```bash
-nohup openfeed-supply-cycle --loop --interval 900 > logs/supply.out 2>&1 &
-nohup openfeed-refill-cycle --loop > logs/refill.out 2>&1 &
+openfeed --instance /path/to/openfeed-instance start
 ```
 
-Avoid in production — long-running Python + opencli daemon will eventually
-drift (memory creep, stale tabs).
+Use `openfeed --instance /path/to/openfeed-instance start --local-server --open`
+when you also want the built-in local feed server.
 
 ## Observing
 
@@ -87,10 +95,10 @@ jq -s 'map(select(.started_at > "'$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)'")) | gro
 
 ```bash
 # Find PID
-pgrep -fa openfeed-supply-cycle
+pgrep -fa "openfeed .*start|openfeed.core.supply_cycle"
 # Kill (SIGTERM lets the current tick complete)
-pkill -TERM -f openfeed-supply-cycle
-# Restart from cron / nohup
+pkill -TERM -f "openfeed .*start|openfeed.core.supply_cycle"
+# Restart from cron / foreground runner
 ```
 
 ### opencli wedged
@@ -116,9 +124,8 @@ mv state/source_catalog/{topic}.json state/source_catalog/{topic}.json.bad
 
 ### "I made a config change and it's not taking"
 
-Daemons load config at process start. Restart the affected daemon
-(restart `openfeed-supply-cycle` for `discover` / `filter` / `patrol`
-config changes; `openfeed-refill-cycle` for `learn` / `push`).
+Daemons load config at process start. Restart the affected foreground runner
+or daemon after config changes.
 
 ## Cost monitoring
 

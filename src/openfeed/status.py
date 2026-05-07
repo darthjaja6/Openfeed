@@ -10,6 +10,7 @@ import fcntl
 import json
 import os
 import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -29,10 +30,10 @@ _HISTORY_PATH = Path("ledgers/history.jsonl")
 _CYCLE_SUMMARY_PATH = Path("ledgers/cycle_summary.jsonl")
 _PATROL_DIR = Path("queues/patrol")
 _PROCESS_MARKERS = {
-    "supply": "openfeed-supply-cycle",
-    "refill": "openfeed-refill-cycle",
-    "prepare": "openfeed-prepare-video",
-    "local_server": "openfeed-local-server",
+    "supply": ("openfeed-supply-cycle", "openfeed.core.supply_cycle"),
+    "refill": ("openfeed-refill-cycle", "openfeed.core.refill_cycle"),
+    "prepare": ("openfeed-prepare-video", "openfeed.core.prepare_video"),
+    "local_server": ("openfeed-local-server", "openfeed.clients.consumer.local_web"),
 }
 
 
@@ -147,8 +148,8 @@ def _process_state() -> dict[str, list[str]]:
         stripped = line.strip()
         if not stripped or "openfeed-status" in stripped:
             continue
-        for label, marker in _PROCESS_MARKERS.items():
-            if marker in stripped:
+        for label, markers in _PROCESS_MARKERS.items():
+            if any(marker in stripped for marker in markers):
                 pid = stripped.split(maxsplit=1)[0]
                 found.setdefault(label, []).append(pid)
     return found
@@ -223,6 +224,11 @@ def main(argv: list[str] | None = None) -> int:
 
         status = _load_queue_status()
         if status is not None:
+            if status.total_pushable_inventory is not None:
+                print(
+                    "- pushable inventory: "
+                    f"{status.total_pushable_inventory}/{status.total_inventory}"
+                )
             print(f"- refill topics: {status.refill_topics}")
 
         patrol_files = len(list(_PATROL_DIR.glob("*.json"))) if _PATROL_DIR.exists() else 0

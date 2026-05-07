@@ -299,29 +299,36 @@ def _candidates(
     backoff = timedelta(minutes=cfg.failure_backoff_minutes)
     now = _utc_now()
     by_topic: dict[str, dict[str, tuple[str, float]]] = {}
-    for qi in _video_working_set(queue, cfg, platform=platform, topic_filter=topic_filter):
-        topic = qi.content.topic
-        slot = by_topic.setdefault(topic, {})
-        content_id = qi.content.content_id
-        url = _video_url(qi, platform)
-        if not url:
+    for topic, items in queue.topics.items():
+        if topic_filter is not None and topic != topic_filter:
             continue
-        entry = index.videos.get(content_id)
-        if entry is not None:
-            if entry.state == "ready" and entry.local_path and Path(entry.local_path).exists():
+        eligible_items = []
+        for qi in _video_items_for_platform(items, platform):
+            content_id = qi.content.content_id
+            url = _video_url(qi, platform)
+            if not url:
                 continue
-            if entry.state == "permanently_failed":
-                continue
-            if entry.state == "failed" and entry.last_failed_at:
-                try:
-                    last = datetime.fromisoformat(entry.last_failed_at)
-                except ValueError:
-                    last = None
-                if last is not None and (now - last) < backoff:
+            entry = index.videos.get(content_id)
+            if entry is not None:
+                if entry.state == "ready" and entry.local_path and Path(entry.local_path).exists():
                     continue
-        existing = slot.get(content_id)
-        if existing is None or qi.rank_score > existing[1]:
-            slot[content_id] = (url, qi.rank_score)
+                if entry.state == "permanently_failed":
+                    continue
+                if entry.state == "failed" and entry.last_failed_at:
+                    try:
+                        last = datetime.fromisoformat(entry.last_failed_at)
+                    except ValueError:
+                        last = None
+                    if last is not None and (now - last) < backoff:
+                        continue
+            eligible_items.append(qi)
+        slot = by_topic.setdefault(topic, {})
+        for qi in _source_diverse_window(eligible_items, cfg.ready_target_per_topic):
+            content_id = qi.content.content_id
+            url = _video_url(qi, platform)
+            existing = slot.get(content_id)
+            if existing is None or qi.rank_score > existing[1]:
+                slot[content_id] = (url, qi.rank_score)
     by_topic = {topic: slot for topic, slot in by_topic.items() if slot}
     # Sort each topic's videos by rank_score desc.
     per_topic_sorted = {

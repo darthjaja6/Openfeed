@@ -26,13 +26,10 @@ files to live. Keep the code checkout separate from those runtime files:
 ```bash
 git clone https://github.com/darthjaja6/Openfeed.git openfeed
 
-./openfeed/scripts/install
-source .venv/bin/activate
+uv tool install ./openfeed
 
 cp openfeed/examples/web/openfeed.yaml openfeed.yaml
 cp openfeed/examples/web/.env.local.example .env.local
-cp openfeed/examples/web/run-openfeed run-openfeed
-chmod +x run-openfeed
 mkdir -p output
 ```
 
@@ -79,7 +76,7 @@ OPENROUTER_API_KEY=sk-or-v1-...
 Start the local scheduler and feed server:
 
 ```bash
-./run-openfeed start
+openfeed start --local-server --open
 ```
 
 `start` runs `openfeed doctor` first. If config, credentials, templates, or
@@ -88,26 +85,73 @@ the supply, prepare, and refill loops, then opens the local feed at
 `http://127.0.0.1:8765/`. The first cards can take a while because OpenFeed
 needs to find sources, review content, and build the queue.
 
+## CLI Usage
+
+The installed `openfeed` command runs an OpenFeed instance. An instance is a
+directory that contains `openfeed.yaml` and `.env.local`; runtime state,
+downloads, logs, and ledgers go under `output/`.
+
+When you run `openfeed` from the instance directory, no path flags are needed:
+
+```bash
+openfeed doctor
+openfeed status
+openfeed start --local-server --open
+```
+
+From anywhere else, point the CLI at the instance:
+
+```bash
+openfeed --instance /path/to/my-openfeed doctor
+openfeed --instance /path/to/my-openfeed status
+openfeed --instance /path/to/my-openfeed start
+```
+
+The defaults are:
+
+```text
+--config  <instance>/openfeed.yaml
+--workdir <instance>/output
+```
+
+You can override them when needed:
+
+```bash
+openfeed --instance /path/to/my-openfeed \
+  --config /path/to/openfeed.yaml \
+  --workdir /path/to/output \
+  status
+```
+
+Common one-shot commands are:
+
+```bash
+openfeed --instance /path/to/my-openfeed supply
+openfeed --instance /path/to/my-openfeed prepare
+openfeed --instance /path/to/my-openfeed refill
+openfeed --instance /path/to/my-openfeed discover
+```
+
 ## Next Steps
 
 ### Change your Preference Settings
 
 Edit `openfeed.yaml` to change your topic, description, language preferences,
-or enabled platforms. The next `./run-openfeed start` run reads the updated
+or enabled platforms. The next `openfeed start` run reads the updated
 config and reconciles topic state before collecting new content.
 
 ### Keep a long-running job
 
 The benefit of turning Openfeed to a long-running job is that it can check your
-content consumption status and continuously refill your feed. `./run-openfeed start` 
+content consumption status and continuously refill your feed. `openfeed start`
 is the foreground runner. After the Quickstart works, use cron on a machine that 
 should keep OpenFeed running:
 
 ```cron
-*/15 * * * * /path/to/my-openfeed/run-openfeed supply
-* * * * * /path/to/my-openfeed/run-openfeed prepare
-* * * * * /path/to/my-openfeed/run-openfeed refill
-0 3 * * 1 /path/to/my-openfeed/run-openfeed discover
+*/15 * * * * openfeed --instance /path/to/my-openfeed supply
+* * * * * openfeed --instance /path/to/my-openfeed prepare
+* * * * * openfeed --instance /path/to/my-openfeed refill
+0 3 * * 1 openfeed --instance /path/to/my-openfeed discover
 ```
 
 ### Push to Ticlawk

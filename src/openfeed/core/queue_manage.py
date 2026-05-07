@@ -26,11 +26,14 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from openfeed.core.judgment_ledger import attach_file as _attach_ledger, emit_judgment
+from openfeed.models.image_cache import ImageCacheIndex
 from openfeed.models.interests import InterestEntry, load_interests
 from openfeed.models.queue import Queue, QueueItem, QueueStatus, TopicStatus
 from openfeed.models.runtime import RuntimeConfig, load_runtime
+from openfeed.models.video_cache import VideoCacheIndex
 from openfeed.utils.content_meta import yt_ago_to_days
 from openfeed.utils.logging_setup import configure_task_logging
+from openfeed.utils.media_readiness import queue_item_media_readiness
 from openfeed.utils.state_io import atomic_write_json
 
 
@@ -38,6 +41,8 @@ logger = logging.getLogger("queue_manage")
 
 _QUEUE_JSON = Path("state/queue.json")
 _QUEUE_STATUS_JSON = Path("state/queue_status.json")
+_VIDEO_CACHE_INDEX_JSON = Path("state/video_cache_index.json")
+_IMAGE_CACHE_INDEX_JSON = Path("state/image_cache_index.json")
 _LEDGER_PATH = Path("ledgers/decisions.jsonl")
 
 
@@ -170,19 +175,82 @@ def _sort_topics(queue: Queue) -> None:
         queue.topics[topic] = items
 
 
+def _load_video_cache_index() -> VideoCacheIndex:
+    if not _VIDEO_CACHE_INDEX_JSON.exists():
+        return VideoCacheIndex(generated_at=_utc_now_iso())
+    try:
+        return VideoCacheIndex.model_validate(
+            json.loads(_VIDEO_CACHE_INDEX_JSON.read_text(encoding="utf-8"))
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("video_cache_index malformed; treating videos as not ready: %s", exc)
+        return VideoCacheIndex(generated_at=_utc_now_iso())
+
+
+def _load_image_cache_index() -> ImageCacheIndex:
+    if not _IMAGE_CACHE_INDEX_JSON.exists():
+        return ImageCacheIndex(generated_at=_utc_now_iso())
+    try:
+        return ImageCacheIndex.model_validate(
+            json.loads(_IMAGE_CACHE_INDEX_JSON.read_text(encoding="utf-8"))
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("image_cache_index malformed; treating images as not ready: %s", exc)
+        return ImageCacheIndex(generated_at=_utc_now_iso())
+
+
+def _drop_permanently_failed_media(
+    queue: Queue,
+    video_idx: VideoCacheIndex,
+    image_idx: ImageCacheIndex,
+) -> int:
+    removed = 0
+    for topic, items in list(queue.topics.items()):
+        kept: list[QueueItem] = []
+        for qi in items:
+            state = queue_item_media_readiness(qi, video_idx, image_idx)
+            if state.permanent_failure:
+                removed += 1
+                logger.info(
+                    "[%s] dropping permanently failed media item %s (%s)",
+                    topic,
+                    qi.content.content_id,
+                    state.reason,
+                )
+                continue
+            if state.stale_rendered_card:
+                qi.rendered_card = None
+            kept.append(qi)
+        queue.topics[topic] = kept
+    return removed
+
+
 def _compute_status(
     queue: Queue, topic_by_name: dict[str, InterestEntry], runtime: RuntimeConfig,
 ) -> QueueStatus:
     qm = runtime.queue_manage
     target = max(qm.topic_floor, qm.topic_capacity)
+    video_idx = _load_video_cache_index()
+    image_idx = _load_image_cache_index()
 
     total_inventory = sum(len(v) for v in queue.topics.values())
+    total_pushable_inventory = 0
     per_topic: dict[str, TopicStatus] = {}
     for topic in topic_by_name:
-        inv = len(queue.topics.get(topic, []))
-        gap = max(0, target - inv)
+        items = queue.topics.get(topic, [])
+        inv = len(items)
+        pushable = sum(
+            1 for qi in items
+            if queue_item_media_readiness(qi, video_idx, image_idx).ready
+        )
+        total_pushable_inventory += pushable
+        blocked = inv - pushable
+        gap = max(0, target - pushable)
         per_topic[topic] = TopicStatus(
-            inventory=inv, target=target,
+            inventory=inv,
+            pushable_inventory=pushable,
+            blocked_inventory=blocked,
+            target=target,
             refill_gap=gap, floor=qm.topic_floor,
         )
 
@@ -194,6 +262,7 @@ def _compute_status(
     return QueueStatus(
         generated_at=_utc_now_iso(),
         total_inventory=total_inventory,
+        total_pushable_inventory=total_pushable_inventory,
         topic_capacity=qm.topic_capacity,
         per_topic=per_topic,
         refill_topics=refill_topics,
@@ -228,6 +297,11 @@ def main(argv: list[str] | None = None) -> int:
     expired = _expire_stale(queue, topic_by_name, runtime)
     logger.info("expired %d stale items", expired)
 
+    video_idx = _load_video_cache_index()
+    image_idx = _load_image_cache_index()
+    permanent_removed = _drop_permanently_failed_media(queue, video_idx, image_idx)
+    logger.info("removed %d permanently failed media items", permanent_removed)
+
     _sort_topics(queue)
     queue.generated_at = _utc_now_iso()
 
@@ -243,8 +317,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     for topic, s in sorted(status.per_topic.items(), key=lambda kv: -kv[1].refill_gap):
         logger.info(
-            "  %-12s inv=%-3d target=%-3d gap=%-3d",
-            topic, s.inventory, s.target, s.refill_gap,
+            "  %-12s inv=%-3d pushable=%-3d blocked=%-3d target=%-3d gap=%-3d",
+            topic,
+            s.inventory,
+            s.pushable_inventory,
+            s.blocked_inventory,
+            s.target,
+            s.refill_gap,
         )
     return 0
 
