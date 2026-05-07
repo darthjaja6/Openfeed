@@ -47,6 +47,7 @@ from openfeed.clients.consumer import get_consumer, ticlawk
 from openfeed.clients.llm import GeminiRunner
 from openfeed.models.history import HistoryEntry
 from openfeed.models.image_assets import ImageAssetIndex
+from openfeed.models.image_cache import ImageCacheIndex
 from openfeed.models.interests import load_interests
 from openfeed.models.persona import load_persona
 from openfeed.models.queue import Queue, QueueItem
@@ -66,6 +67,7 @@ _HISTORY_PATH = Path("ledgers/history.jsonl")
 _ASSET_INDEX_PATH = Path("state/video_assets.json")
 _IMAGE_ASSET_INDEX_PATH = Path("state/image_assets.json")
 _CACHE_INDEX_PATH = Path("state/video_cache_index.json")
+_IMAGE_CACHE_INDEX_PATH = Path("state/image_cache_index.json")
 _DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 15 * 60
 _DEFAULT_SPACING_HISTORY_ROWS = 500
 
@@ -97,6 +99,22 @@ def _load_queue() -> Queue:
 def _save_queue(queue: Queue) -> None:
     queue.generated_at = _utc_now_iso()
     atomic_write_json(_QUEUE_PATH, queue.model_dump())
+
+
+def _load_video_cache_index() -> VideoCacheIndex:
+    if not _CACHE_INDEX_PATH.exists():
+        return VideoCacheIndex(generated_at=_utc_now_iso(), videos={})
+    return VideoCacheIndex.model_validate(
+        json.loads(_CACHE_INDEX_PATH.read_text(encoding="utf-8"))
+    )
+
+
+def _load_image_cache_index() -> ImageCacheIndex:
+    if not _IMAGE_CACHE_INDEX_PATH.exists():
+        return ImageCacheIndex(generated_at=_utc_now_iso(), images={})
+    return ImageCacheIndex.model_validate(
+        json.loads(_IMAGE_CACHE_INDEX_PATH.read_text(encoding="utf-8"))
+    )
 
 
 def _read_recent_history(n: int) -> list[HistoryEntry]:
@@ -162,6 +180,63 @@ def _source_diverse_top_pool(pool: list[QueueItem], limit: int) -> list[QueueIte
         if len(out) >= limit:
             break
     return out or pool[:limit]
+
+
+def _paths_exist(paths: list[str] | None) -> bool:
+    return bool(paths) and all(Path(p).exists() for p in paths)
+
+
+def _rendered_card_local_media_ready(item: QueueItem) -> bool:
+    payload = item.rendered_card
+    if payload is None:
+        return False
+    if payload.content_subtype == "video":
+        return bool(payload.video_path) and Path(payload.video_path).exists()
+    if payload.content_subtype == "gallery":
+        return _paths_exist(payload.image_paths)
+    return True
+
+
+def _video_cache_ready(video_idx: VideoCacheIndex, content_id: str) -> bool:
+    entry = video_idx.videos.get(content_id)
+    return (
+        entry is not None
+        and entry.state == "ready"
+        and bool(entry.local_path)
+        and Path(entry.local_path).exists()
+    )
+
+
+def _image_cache_ready(image_idx: ImageCacheIndex, content_id: str) -> bool:
+    entry = image_idx.images.get(content_id)
+    return (
+        entry is not None
+        and entry.state == "ready"
+        and _paths_exist(entry.image_paths)
+    )
+
+
+def _queue_item_media_ready(
+    item: QueueItem,
+    video_idx: VideoCacheIndex,
+    image_idx: ImageCacheIndex,
+) -> bool:
+    content = item.content
+    if item.rendered_card is not None:
+        if _rendered_card_local_media_ready(item):
+            return True
+        item.rendered_card = None
+    if content.platform == "youtube":
+        return _video_cache_ready(video_idx, content.content_id)
+    if content.platform == "tiktok":
+        if content.tiktok is None:
+            return False
+        if content.tiktok.media_kind == "video":
+            return _video_cache_ready(video_idx, content.content_id)
+        if content.tiktok.media_kind == "photo":
+            return _image_cache_ready(image_idx, content.content_id)
+        return False
+    return True
 
 
 def _pick_for_topic(
@@ -696,11 +771,16 @@ def main(argv: list[str] | None = None) -> int:
     recent_all = _read_recent_history(
         max(cfg.same_source_gap + 5, _DEFAULT_SPACING_HISTORY_ROWS)
     )
+    video_cache_idx = _load_video_cache_index()
+    image_cache_idx = _load_image_cache_index()
     picks_by_topic: dict[str, list[QueueItem]] = {}
     all_picks: list[QueueItem] = []
     for topic, n in to_push_by_topic.items():
         topic_recent = [h for h in recent_all if h.topic == topic]
-        topic_items = queue.topics[topic]
+        topic_items = [
+            qi for qi in queue.topics[topic]
+            if _queue_item_media_ready(qi, video_cache_idx, image_cache_idx)
+        ]
         if skip_youtube and consumer_type_by_topic.get(topic) == "ticlawk":
             topic_items = [qi for qi in topic_items if qi.content.platform != "youtube"]
         topic_picks = _pick_for_topic(

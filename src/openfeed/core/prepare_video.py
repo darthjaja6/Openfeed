@@ -9,21 +9,20 @@ push time and get another shot next tick — no blocking.
 
 Each tick:
   1. Load queue.json + state/video_cache_index.json.
-  2. Find native video cards in queue whose content_id is either:
+  2. Build a small source-diverse working set per topic. The local media
+     cache serves this near-term push window, not the whole queue.
+  3. Find native video cards in that working set whose content_id is either:
        - not in the index yet (never tried)
        - in `failed` state past the backoff window
      `permanently_failed` and `ready` videos are skipped.
-  3. For each topic, stop once it already has `ready_target_per_topic`
-     ready queued videos.
-  4. Sort candidates by rank_score desc — most-likely-to-be-pushed first.
-  5. If the local cache is already at/over the configured cap at tick start,
-     skip downloads for this tick. Otherwise pick top N (`max_per_tick`);
+  4. If the local cache is already at/over the configured cap at tick start,
+     evict ready mp4s outside the current working set. Otherwise pick top N (`max_per_tick`);
      run yt-dlp in parallel up to `max_concurrent`, bounded by
      `tick_budget_seconds`.
-  6. Per result: write file to `state/video_cache/<vid>.mp4`, update
+  5. Per result: write file to `state/video_cache/<vid>.mp4`, update
      index entry to `ready` (or bump failure_count and set `failed` /
      `permanently_failed`).
-  7. Atomic-rewrite the index.
+  6. Atomic-rewrite the index.
 
 Failure of any single video doesn't stall the others — each runs in its
 own thread. Tick budget exhaustion is graceful: in-flight downloads
@@ -148,9 +147,137 @@ def _cache_size_bytes() -> int:
     return total
 
 
+def _evict_ready_videos_outside_working_set(
+    index: VideoCacheIndex,
+    protected_ids: set[str],
+    *,
+    cap_bytes: int,
+) -> tuple[int, int]:
+    if cap_bytes <= 0:
+        return 0, 0
+    cache_bytes = _cache_size_bytes()
+    if cache_bytes < cap_bytes:
+        return 0, 0
+    target_bytes = int(cap_bytes * 0.8)
+    candidates = []
+    for video_id, entry in index.videos.items():
+        if video_id in protected_ids:
+            continue
+        if entry.state != "ready" or not entry.local_path:
+            continue
+        path = Path(entry.local_path)
+        if not path.exists():
+            candidates.append((entry.downloaded_at or "", video_id, path, 0, True))
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        candidates.append((entry.downloaded_at or "", video_id, path, size, False))
+
+    evicted = 0
+    freed = 0
+    for _downloaded_at, video_id, path, size, missing in sorted(candidates):
+        if cache_bytes < target_bytes:
+            break
+        if not missing:
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning("[%s] local cache eviction failed: %s", video_id, exc)
+                continue
+        index.videos.pop(video_id, None)
+        evicted += 1
+        freed += size
+        cache_bytes -= size
+
+    if evicted:
+        _save_index(index)
+        logger.info(
+            "evicted %d ready videos outside working set (%.1f MB)",
+            evicted,
+            freed / 1e6,
+        )
+    return evicted, freed
+
+
 # ---------------------------------------------------------------------------
 # Eligibility
 # ---------------------------------------------------------------------------
+
+
+def _source_diverse_window(items: list, limit: int) -> list:
+    if limit <= 0:
+        limit = 1
+    out: list = []
+    seen_sources: set[str] = set()
+    for item in items:
+        source_id = item.content.source_id
+        if source_id in seen_sources:
+            continue
+        out.append(item)
+        seen_sources.add(source_id)
+        if len(out) >= limit:
+            return out
+    for item in items:
+        if item in out:
+            continue
+        out.append(item)
+        if len(out) >= limit:
+            return out
+    return out
+
+
+def _video_url(qi, platform: str) -> str:
+    if platform == "youtube" and qi.content.youtube is not None:
+        return qi.content.youtube.url
+    if platform == "tiktok" and qi.content.tiktok is not None:
+        return qi.content.tiktok.url
+    return ""
+
+
+def _video_items_for_platform(items: list, platform: str) -> list:
+    out = []
+    for qi in items:
+        if qi.content.platform != platform:
+            continue
+        if platform == "tiktok" and (
+            qi.content.tiktok is None or qi.content.tiktok.media_kind != "video"
+        ):
+            continue
+        if not _video_url(qi, platform):
+            continue
+        out.append(qi)
+    return out
+
+
+def _video_working_set(
+    queue: Queue,
+    cfg: YouTubeDownloadConfig | TikTokDownloadConfig,
+    *,
+    platform: str,
+    topic_filter: str | None = None,
+) -> list:
+    out = []
+    for topic, items in queue.topics.items():
+        if topic_filter is not None and topic != topic_filter:
+            continue
+        media_items = _video_items_for_platform(items, platform)
+        out.extend(_source_diverse_window(media_items, cfg.ready_target_per_topic))
+    return out
+
+
+def _video_working_set_ids(
+    queue: Queue,
+    cfg: YouTubeDownloadConfig | TikTokDownloadConfig,
+    *,
+    platform: str,
+    topic_filter: str | None = None,
+) -> set[str]:
+    return {
+        qi.content.content_id
+        for qi in _video_working_set(queue, cfg, platform=platform, topic_filter=topic_filter)
+    }
 
 
 def _candidates(
@@ -171,53 +298,31 @@ def _candidates(
     """
     backoff = timedelta(minutes=cfg.failure_backoff_minutes)
     now = _utc_now()
-    # Group eligible videos per topic, dedup by content_id (best rank_score wins).
     by_topic: dict[str, dict[str, tuple[str, float]]] = {}
-    for topic, items in queue.topics.items():
-        if topic_filter is not None and topic != topic_filter:
+    for qi in _video_working_set(queue, cfg, platform=platform, topic_filter=topic_filter):
+        topic = qi.content.topic
+        slot = by_topic.setdefault(topic, {})
+        content_id = qi.content.content_id
+        url = _video_url(qi, platform)
+        if not url:
             continue
-        slot: dict[str, tuple[str, float]] = {}
-        front_seen = 0
-        for qi in items:
-            if qi.content.platform != platform:
+        entry = index.videos.get(content_id)
+        if entry is not None:
+            if entry.state == "ready" and entry.local_path and Path(entry.local_path).exists():
                 continue
-            if platform == "tiktok" and (
-                qi.content.tiktok is None or qi.content.tiktok.media_kind != "video"
-            ):
+            if entry.state == "permanently_failed":
                 continue
-            content_id = qi.content.content_id
-            url = ""
-            if platform == "youtube" and qi.content.youtube is not None:
-                url = qi.content.youtube.url
-            elif platform == "tiktok" and qi.content.tiktok is not None:
-                url = qi.content.tiktok.url
-            if not url:
-                continue
-            entry = index.videos.get(content_id)
-            if entry is not None:
-                if entry.state == "ready":
-                    if entry.local_path and Path(entry.local_path).exists():
-                        front_seen += 1
-                    if front_seen >= cfg.ready_target_per_topic:
-                        break
+            if entry.state == "failed" and entry.last_failed_at:
+                try:
+                    last = datetime.fromisoformat(entry.last_failed_at)
+                except ValueError:
+                    last = None
+                if last is not None and (now - last) < backoff:
                     continue
-                if entry.state == "permanently_failed":
-                    continue
-                if entry.state == "failed" and entry.last_failed_at:
-                    try:
-                        last = datetime.fromisoformat(entry.last_failed_at)
-                    except ValueError:
-                        last = None
-                    if last is not None and (now - last) < backoff:
-                        continue
-            front_seen += 1
-            existing = slot.get(content_id)
-            if existing is None or qi.rank_score > existing[1]:
-                slot[content_id] = (url, qi.rank_score)
-            if front_seen >= cfg.ready_target_per_topic:
-                break
-        if slot:
-            by_topic[topic] = slot
+        existing = slot.get(content_id)
+        if existing is None or qi.rank_score > existing[1]:
+            slot[content_id] = (url, qi.rank_score)
+    by_topic = {topic: slot for topic, slot in by_topic.items() if slot}
     # Sort each topic's videos by rank_score desc.
     per_topic_sorted = {
         topic: sorted(
@@ -255,12 +360,15 @@ def _image_candidates(
         if topic_filter is not None and topic != topic_filter:
             continue
         slot: dict[str, tuple[list[str], str, float]] = {}
-        front_seen = 0
-        for qi in items:
-            if qi.content.platform != "tiktok" or qi.content.tiktok is None:
-                continue
-            if qi.content.tiktok.media_kind != "photo":
-                continue
+        media_items = [
+            qi for qi in items
+            if (
+                qi.content.platform == "tiktok"
+                and qi.content.tiktok is not None
+                and qi.content.tiktok.media_kind == "photo"
+            )
+        ]
+        for qi in _source_diverse_window(media_items, cfg.ready_target_per_topic):
             content_id = qi.content.content_id
             urls = [u for u in qi.content.tiktok.photo_image_urls if u]
             if not urls:
@@ -268,9 +376,6 @@ def _image_candidates(
             entry = index.images.get(content_id)
             if entry is not None:
                 if entry.state == "ready" and all(Path(p).exists() for p in entry.image_paths):
-                    front_seen += 1
-                    if front_seen >= cfg.ready_target_per_topic:
-                        break
                     continue
                 if entry.state == "permanently_failed":
                     continue
@@ -281,12 +386,9 @@ def _image_candidates(
                         last = None
                     if last is not None and (now - last) < backoff:
                         continue
-            front_seen += 1
             existing = slot.get(content_id)
             if existing is None or qi.rank_score > existing[2]:
                 slot[content_id] = (urls, qi.content.tiktok.url, qi.rank_score)
-            if front_seen >= cfg.ready_target_per_topic:
-                break
         if slot:
             by_topic[topic] = slot
     per_topic_sorted = {
@@ -427,6 +529,7 @@ def _run_tick(
     cfg: YouTubeDownloadConfig | TikTokDownloadConfig,
     *,
     cache_max_gb: float,
+    protected_ids: set[str],
     topic_filter: str | None = None,
 ) -> tuple[int, int, int, int]:
     """One prepare_video tick. Returns (eligible, attempted, ready, failed)."""
@@ -450,6 +553,13 @@ def _run_tick(
 
     cap_bytes = int(cache_max_gb * 1024 * 1024 * 1024)
     cache_bytes = _cache_size_bytes()
+    if cap_bytes > 0 and cache_bytes >= cap_bytes:
+        _evict_ready_videos_outside_working_set(
+            index,
+            protected_ids,
+            cap_bytes=cap_bytes,
+        )
+        cache_bytes = _cache_size_bytes()
     if cap_bytes > 0 and cache_bytes >= cap_bytes:
         detail = f"video cache at {cache_bytes / 1024 / 1024 / 1024:.2f} GB >= {cache_max_gb:.2f} GB"
         backpressure.block_lane(
@@ -645,6 +755,21 @@ def main(argv: list[str] | None = None) -> int:
 
     runtime = load_runtime(workdir)
     platforms = [args.platform] if args.platform else ["youtube", "tiktok"]
+    queue = _load_queue()
+    protected_ids = (
+        _video_working_set_ids(
+            queue,
+            runtime.youtube_download,
+            platform="youtube",
+            topic_filter=args.topic,
+        )
+        | _video_working_set_ids(
+            queue,
+            runtime.tiktok_download,
+            platform="tiktok",
+            topic_filter=args.topic,
+        )
+    )
 
     totals = {"eligible": 0, "attempted": 0, "ready": 0, "failed": 0}
     for platform in platforms:
@@ -654,6 +779,7 @@ def main(argv: list[str] | None = None) -> int:
                 platform,
                 cfg,
                 cache_max_gb=runtime.video_cleanup.cache_max_gb,
+                protected_ids=protected_ids,
                 topic_filter=args.topic,
             )
             logger.info(

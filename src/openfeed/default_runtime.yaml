@@ -84,15 +84,15 @@ youtube_download:
   failure_backoff_minutes: 30
   max_failures_before_permanent: 5
 tiktok_download:
-  ready_target_per_topic: 3
-  max_per_tick: 3
+  ready_target_per_topic: 12
+  max_per_tick: 6
   max_concurrent: 2
   tick_budget_seconds: 90
   max_filesize_mb: 80
   failure_backoff_minutes: 30
   max_failures_before_permanent: 5
 tiktok_image_download:
-  ready_target_per_topic: 3
+  ready_target_per_topic: 6
   max_per_tick: 3
   max_concurrent: 2
   tick_budget_seconds: 60

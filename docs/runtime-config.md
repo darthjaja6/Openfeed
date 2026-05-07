@@ -93,12 +93,24 @@ affected process.
 | `failure_backoff_minutes` | 30 | Wait before retrying a failed video |
 | `max_failures_before_permanent` | 5 | Mark `permanently_failed` after N consecutive fails |
 
+## `tiktok_download`
+
+| field | default | meaning |
+|---|---|---|
+| `ready_target_per_topic` | 12 | Source-diverse TikTok video working-set size per topic |
+| `max_per_tick` | 6 | TikTok videos to attempt downloading per prepare_video tick |
+| `max_concurrent` | 2 | Parallel yt-dlp processes |
+| `tick_budget_seconds` | 90 | Wall-clock cap for the TikTok video prepare phase |
+| `max_filesize_mb` | 80 | Per-video local download size cap |
+| `failure_backoff_minutes` | 30 | Wait before retrying a failed video |
+| `max_failures_before_permanent` | 5 | Mark `permanently_failed` after N consecutive fails |
+
 ## `video_cleanup`
 
 | field | default | meaning |
 |---|---|---|
-| `keep_days` | 14 | Drop local mp4 + producer asset N days after last push |
-| `cache_max_gb` | 5.0 | Local mp4 cache cap (LRU evict above) |
+| `keep_days` | 14 | Drop producer assets N days after last push; push/prepare own short-term local media cleanup |
+| `cache_max_gb` | 5.0 | Local mp4 cache cap. prepare_video may evict ready mp4s outside the current working set when at cap |
 | `ticlawk_quota_max_gb` | 45.0 in admin deployment | Account-level Ticlawk asset quota guard. Set this below the creator's real quota, usually 80%-90% of the quota. |
 
 ## `learn`
