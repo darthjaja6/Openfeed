@@ -39,7 +39,7 @@ from openfeed.core.bootstrap_io import merge_search_terms
 from openfeed.core.interest_bootstrap import generate_keywords_per_platform
 from openfeed.models.interests import InterestsConfig, load_interests
 from openfeed.models.persona import PersonaOutput
-from openfeed.models.queue import QueueStatus
+from openfeed.models.queue import QueueStatus, SourceInventoryStatus
 from openfeed.utils import cycle_summary
 from openfeed.utils import catalog_io
 from openfeed.utils.logging_setup import configure_task_logging
@@ -50,6 +50,8 @@ logger = logging.getLogger("supply_cycle")
 _BOOTSTRAP_DID_WORK = False
 _ESCALATION_PATH = Path("state/supply_escalation.json")
 _STARVED_DISCOVER_BACKOFF_SECONDS = 6 * 60 * 60
+_LIVE_SOURCE_DISCOVER_BACKOFF_SECONDS = 6 * 60 * 60
+_MIN_LIVE_SOURCES_PER_SLOT = 4
 
 
 def _load_json(path: Path) -> dict:
@@ -289,9 +291,125 @@ def _starvation_discover(_argv: list[str] | None = None) -> int:
     return 0
 
 
+def _source_is_live(source_status: SourceInventoryStatus) -> bool:
+    return (
+        source_status.queued_count > 0
+        or source_status.pushable_count > 0
+        or (source_status.needs_refill and source_status.exhausted_until is None)
+    )
+
+
+def _live_source_discover(_argv: list[str] | None = None) -> int:
+    """Discover replacement sources when active sources are mostly depleted.
+
+    `active` means catalog-approved. It does not mean the source still has
+    content in the queue. This step focuses on slots that are actually feeding
+    the queue now but have too few stocked sources, then runs one scoped
+    discover per supply cycle.
+    """
+    if _BOOTSTRAP_DID_WORK:
+        logger.info("live_source_discover: skipped; bootstrap already ran this tick")
+        return 0
+
+    status = _load_queue_status()
+    if status is None:
+        return 0
+    config = load_interests(Path.cwd())
+    active_counts = _active_source_counts(Path.cwd())
+    by_slot: dict[tuple[str, str], list[SourceInventoryStatus]] = {}
+    for source_status in status.per_source.values():
+        by_slot.setdefault(
+            (source_status.topic, source_status.platform),
+            [],
+        ).append(source_status)
+
+    candidates: list[tuple[int, int, int, tuple[int, int], int, str, str]] = []
+    slot_index = 0
+    for entry in config.interests:
+        for platform in entry.platforms:
+            active_count = active_counts.get((entry.topic, platform), 0)
+            if active_count == 0:
+                slot_index += 1
+                continue
+            sources = by_slot.get((entry.topic, platform), [])
+            queued_total = sum(source.queued_count for source in sources)
+            if queued_total == 0:
+                slot_index += 1
+                continue
+            stocked_count = sum(1 for source in sources if source.queued_count > 0)
+            if stocked_count < _MIN_LIVE_SOURCES_PER_SLOT:
+                live_count = sum(1 for source in sources if _source_is_live(source))
+                candidates.append((
+                    stocked_count,
+                    live_count,
+                    -queued_total,
+                    _topic_demand_priority(status, entry.topic),
+                    slot_index,
+                    entry.topic,
+                    platform,
+                ))
+            slot_index += 1
+
+    if not candidates:
+        return 0
+
+    state = _load_json(_ESCALATION_PATH)
+    by_slot_state = state.setdefault("live_source_discover_last_at", {})
+    if not isinstance(by_slot_state, dict):
+        by_slot_state = {}
+        state["live_source_discover_last_at"] = by_slot_state
+
+    candidates.sort()
+    target: tuple[str, str] | None = None
+    for stocked_count, live_count, _neg_queued_total, _, _, topic, platform in candidates:
+        key = _slot_key(topic, platform)
+        elapsed = _seconds_since(by_slot_state.get(key))
+        if elapsed is None or elapsed >= _LIVE_SOURCE_DISCOVER_BACKOFF_SECONDS:
+            target = (topic, platform)
+            logger.info(
+                "live_source_discover: %s has stocked_sources=%d live_sources=%d (<%d stocked); invoking discover --topic --platform",
+                key,
+                stocked_count,
+                live_count,
+                _MIN_LIVE_SOURCES_PER_SLOT,
+            )
+            break
+    if target is None:
+        logger.info(
+            "live_source_discover: all low-live-source slots are in backoff: %s",
+            [_slot_key(topic, platform) for _, _, _, _, _, topic, platform in candidates],
+        )
+        return 0
+
+    topic, platform = target
+    try:
+        rc = discover_mod.main(["--topic", topic, "--platform", platform])
+    except SystemExit as exc:
+        rc = _system_exit_rc(exc, task=f"discover --topic {topic!r} --platform {platform}")
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "live_source_discover: discover --topic %r --platform %s crashed",
+            topic,
+            platform,
+        )
+        return 0
+    by_slot_state[_slot_key(topic, platform)] = (
+        datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    )
+    atomic_write_json(_ESCALATION_PATH, state)
+    logger.info(
+        "live_source_discover: discover --topic %r --platform %s → rc=%d",
+        topic,
+        platform,
+        rc,
+    )
+    return 0
+
+
 _TASKS: list[tuple[str, Callable[[list[str] | None], int]]] = [
     ("topic_reconcile", topic_reconcile_mod.main),
     ("bootstrap_missing", _bootstrap_missing),
+    ("live_source_discover", _live_source_discover),
     ("starvation_discover", _starvation_discover),
     ("patrol", patrol_mod.main),
     ("filter", filter_mod.main),
