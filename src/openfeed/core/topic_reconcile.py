@@ -19,7 +19,9 @@ from typing import Any
 
 from openfeed.models.interests import InterestEntry, load_interests
 from openfeed.models.queue import Queue
+from openfeed.models.runtime import RuntimeConfig, load_runtime
 from openfeed.utils import catalog_io
+from openfeed.utils.queue_io import mutate_queue
 from openfeed.utils.state_io import atomic_write_json
 
 
@@ -27,8 +29,6 @@ logger = logging.getLogger("topic_reconcile")
 
 _MANIFEST_PATH = Path("state/topic_manifest.json")
 _ARCHIVE_DIR = Path("state/topic_archive")
-_QUEUE_PATH = Path("state/queue.json")
-_QUEUE_STATUS_PATH = Path("state/queue_status.json")
 _LEARN_STATE_PATH = Path("state/learn_state.json")
 _SEARCH_TERMS_PATH = Path("state/search_terms.json")
 _PATROL_DIR = Path("queues/patrol")
@@ -238,64 +238,60 @@ def _remove_search_terms_platform(topic: str, platform: str, archive_dir: Path) 
     return True
 
 
-def _remove_queue_topic(topic: str, archive_dir: Path) -> int:
-    raw = _load_json(_QUEUE_PATH)
-    if not isinstance(raw, dict):
-        return 0
-    queue = Queue.model_validate(raw)
-    if topic not in queue.topics:
-        return 0
-    removed = queue.topics.pop(topic)
-    _archive_write(
-        archive_dir,
-        "queue_items.json",
-        [item.model_dump() for item in removed],
+def _remove_queue_topic(
+    topic: str,
+    archive_dir: Path,
+    topic_by_name: dict[str, InterestEntry],
+    runtime: RuntimeConfig,
+) -> int:
+    def remove(queue: Queue) -> int:
+        if topic not in queue.topics:
+            return 0
+        removed = queue.topics.pop(topic)
+        _archive_write(
+            archive_dir,
+            "queue_items.json",
+            [item.model_dump() for item in removed],
+        )
+        return len(removed)
+
+    return mutate_queue(
+        remove,
+        topic_by_name=topic_by_name,
+        runtime=runtime,
     )
-    queue.generated_at = _utc_now_iso()
-    atomic_write_json(_QUEUE_PATH, queue.model_dump())
-    return len(removed)
 
 
-def _remove_queue_platform(topic: str, platform: str, archive_dir: Path) -> int:
-    raw = _load_json(_QUEUE_PATH)
-    if not isinstance(raw, dict):
-        return 0
-    queue = Queue.model_validate(raw)
-    items = queue.topics.get(topic)
-    if not items:
-        return 0
-    removed = [item for item in items if item.content.platform == platform]
-    if not removed:
-        return 0
-    queue.topics[topic] = [item for item in items if item.content.platform != platform]
-    _archive_write(
-        archive_dir,
-        "queue_items.json",
-        [item.model_dump() for item in removed],
+def _remove_queue_platform(
+    topic: str,
+    platform: str,
+    archive_dir: Path,
+    topic_by_name: dict[str, InterestEntry],
+    runtime: RuntimeConfig,
+) -> int:
+    def remove(queue: Queue) -> int:
+        items = queue.topics.get(topic)
+        if not items:
+            return 0
+        removed = [item for item in items if item.content.platform == platform]
+        if not removed:
+            return 0
+        queue.topics[topic] = [
+            item for item in items
+            if item.content.platform != platform
+        ]
+        _archive_write(
+            archive_dir,
+            "queue_items.json",
+            [item.model_dump() for item in removed],
+        )
+        return len(removed)
+
+    return mutate_queue(
+        remove,
+        topic_by_name=topic_by_name,
+        runtime=runtime,
     )
-    queue.generated_at = _utc_now_iso()
-    atomic_write_json(_QUEUE_PATH, queue.model_dump())
-    return len(removed)
-
-
-def _remove_queue_status_topic(topic: str, archive_dir: Path) -> bool:
-    raw = _load_json(_QUEUE_STATUS_PATH)
-    if not isinstance(raw, dict):
-        return False
-    changed = False
-    per_topic = raw.get("per_topic")
-    if isinstance(per_topic, dict) and topic in per_topic:
-        _archive_write(archive_dir, "queue_status.json", {topic: per_topic[topic]})
-        del per_topic[topic]
-        changed = True
-    refill_topics = raw.get("refill_topics")
-    if isinstance(refill_topics, list) and topic in refill_topics:
-        raw["refill_topics"] = [item for item in refill_topics if item != topic]
-        changed = True
-    if changed:
-        raw["generated_at"] = _utc_now_iso()
-        atomic_write_json(_QUEUE_STATUS_PATH, raw)
-    return changed
 
 
 def _remove_learn_topic(topic: str, *, keep_boundary: bool, changed_at: str) -> bool:
@@ -360,7 +356,6 @@ class TopicResetSummary:
     catalog_sources_removed: int = 0
     search_terms_removed: bool = False
     queue_items_removed: int = 0
-    queue_status_removed: bool = False
     patrol_items_removed: int = 0
     seed_sources_removed: int = 0
     youtube_keywords_removed: int = 0
@@ -381,7 +376,16 @@ class ReconcileResult:
     resets: list[TopicResetSummary] = field(default_factory=list)
 
 
-def _reset_topic_state(workdir: Path, topic: str, *, reason: str, keep_learn_boundary: bool, now: str) -> TopicResetSummary:
+def _reset_topic_state(
+    workdir: Path,
+    topic: str,
+    *,
+    reason: str,
+    keep_learn_boundary: bool,
+    now: str,
+    topic_by_name: dict[str, InterestEntry],
+    runtime: RuntimeConfig,
+) -> TopicResetSummary:
     state_dir = workdir / "state"
     archive_dir = workdir / _ARCHIVE_DIR / now.replace(":", "").replace("+", "Z") / topic
     archive_dir.mkdir(parents=True, exist_ok=True)
@@ -391,8 +395,12 @@ def _reset_topic_state(workdir: Path, topic: str, *, reason: str, keep_learn_bou
         state_dir, topic, archive_dir / "source_catalog.json",
     )
     summary.search_terms_removed = _remove_search_terms(topic, archive_dir)
-    summary.queue_items_removed = _remove_queue_topic(topic, archive_dir)
-    summary.queue_status_removed = _remove_queue_status_topic(topic, archive_dir)
+    summary.queue_items_removed = _remove_queue_topic(
+        topic,
+        archive_dir,
+        topic_by_name,
+        runtime,
+    )
     summary.patrol_items_removed = _remove_patrol_items(topic, archive_dir)
     summary.seed_sources_removed = _remove_topic_from_items_file(state_dir / "seed_sources.json", topic, archive_dir)
     summary.youtube_keywords_removed = _remove_topic_from_items_file(
@@ -414,6 +422,8 @@ def _reset_platform_state(
     *,
     reason: str,
     now: str,
+    topic_by_name: dict[str, InterestEntry],
+    runtime: RuntimeConfig,
 ) -> TopicResetSummary:
     state_dir = workdir / "state"
     archive_dir = (
@@ -436,7 +446,13 @@ def _reset_platform_state(
     )
     summary.catalog_removed = summary.catalog_sources_removed > 0
     summary.search_terms_removed = _remove_search_terms_platform(topic, platform, archive_dir)
-    summary.queue_items_removed = _remove_queue_platform(topic, platform, archive_dir)
+    summary.queue_items_removed = _remove_queue_platform(
+        topic,
+        platform,
+        archive_dir,
+        topic_by_name,
+        runtime,
+    )
     summary.patrol_items_removed = _remove_patrol_items_platform(topic, platform, archive_dir)
     summary.seed_sources_removed = _remove_topic_from_items_file(
         state_dir / "seed_sources.json", topic, archive_dir, platform=platform,
@@ -453,6 +469,7 @@ def _reset_platform_state(
 def reconcile_topics(workdir: Path, *, force_topics: set[str] | None = None) -> ReconcileResult:
     now = _utc_now_iso()
     config = load_interests(workdir)
+    runtime = load_runtime(workdir)
     config_topics = {entry.topic: entry for entry in config.interests}
     current_manifest = _manifest_for(config_topics, now)
     manifest_path = workdir / _MANIFEST_PATH
@@ -511,28 +528,64 @@ def reconcile_topics(workdir: Path, *, force_topics: set[str] | None = None) -> 
 
     for topic in removed:
         result.resets.append(
-            _reset_topic_state(workdir, topic, reason="removed_from_config", keep_learn_boundary=False, now=now)
+            _reset_topic_state(
+                workdir,
+                topic,
+                reason="removed_from_config",
+                keep_learn_boundary=False,
+                now=now,
+                topic_by_name=config_topics,
+                runtime=runtime,
+            )
         )
     for topic in changed:
         result.resets.append(
-            _reset_topic_state(workdir, topic, reason="semantic_config_changed", keep_learn_boundary=True, now=now)
+            _reset_topic_state(
+                workdir,
+                topic,
+                reason="semantic_config_changed",
+                keep_learn_boundary=True,
+                now=now,
+                topic_by_name=config_topics,
+                runtime=runtime,
+            )
         )
     for topic in forced:
         result.resets.append(
-            _reset_topic_state(workdir, topic, reason="forced", keep_learn_boundary=True, now=now)
+            _reset_topic_state(
+                workdir,
+                topic,
+                reason="forced",
+                keep_learn_boundary=True,
+                now=now,
+                topic_by_name=config_topics,
+                runtime=runtime,
+            )
         )
     for slot in removed_platforms:
         topic, platform = slot.rsplit(":", 1)
         result.resets.append(
             _reset_platform_state(
-                workdir, topic, platform, reason="platform_removed", now=now,
+                workdir,
+                topic,
+                platform,
+                reason="platform_removed",
+                now=now,
+                topic_by_name=config_topics,
+                runtime=runtime,
             )
         )
     for slot in changed_platforms:
         topic, platform = slot.rsplit(":", 1)
         result.resets.append(
             _reset_platform_state(
-                workdir, topic, platform, reason="platform_config_changed", now=now,
+                workdir,
+                topic,
+                platform,
+                reason="platform_config_changed",
+                now=now,
+                topic_by_name=config_topics,
+                runtime=runtime,
             )
         )
 

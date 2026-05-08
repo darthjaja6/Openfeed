@@ -28,19 +28,17 @@ from pathlib import Path
 from openfeed.core.judgment_ledger import attach_file as _attach_ledger, emit_judgment
 from openfeed.models.image_cache import ImageCacheIndex
 from openfeed.models.interests import InterestEntry, load_interests
-from openfeed.models.queue import Queue, QueueItem, QueueStatus, TopicStatus
+from openfeed.models.queue import Queue, QueueItem, QueueStatus
 from openfeed.models.runtime import RuntimeConfig, load_runtime
 from openfeed.models.video_cache import VideoCacheIndex
 from openfeed.utils.content_meta import yt_ago_to_days
 from openfeed.utils.logging_setup import configure_task_logging
 from openfeed.utils.media_readiness import queue_item_media_readiness
-from openfeed.utils.state_io import atomic_write_json
+from openfeed.utils.queue_io import compute_queue_status, mutate_queue
 
 
 logger = logging.getLogger("queue_manage")
 
-_QUEUE_JSON = Path("state/queue.json")
-_QUEUE_STATUS_JSON = Path("state/queue_status.json")
 _VIDEO_CACHE_INDEX_JSON = Path("state/video_cache_index.json")
 _IMAGE_CACHE_INDEX_JSON = Path("state/image_cache_index.json")
 _LEDGER_PATH = Path("ledgers/decisions.jsonl")
@@ -247,90 +245,37 @@ def _drop_permanently_failed_media(
     return removed
 
 
-def _compute_status(
-    queue: Queue, topic_by_name: dict[str, InterestEntry], runtime: RuntimeConfig,
-) -> QueueStatus:
-    qm = runtime.queue_manage
-    target = max(qm.topic_floor, qm.topic_capacity)
-    video_idx = _load_video_cache_index()
-    image_idx = _load_image_cache_index()
-
-    total_inventory = sum(len(v) for v in queue.topics.values())
-    total_pushable_inventory = 0
-    per_topic: dict[str, TopicStatus] = {}
-    for topic in topic_by_name:
-        items = queue.topics.get(topic, [])
-        inv = len(items)
-        pushable = sum(
-            1 for qi in items
-            if queue_item_media_readiness(qi, video_idx, image_idx).ready
-        )
-        total_pushable_inventory += pushable
-        blocked = inv - pushable
-        gap = max(0, target - pushable)
-        per_topic[topic] = TopicStatus(
-            inventory=inv,
-            pushable_inventory=pushable,
-            blocked_inventory=blocked,
-            target=target,
-            refill_gap=gap, floor=qm.topic_floor,
-        )
-
-    refill_topics = sorted(
-        [t for t, s in per_topic.items() if s.refill_gap > 0],
-        key=lambda t: per_topic[t].refill_gap, reverse=True,
-    )
-
-    return QueueStatus(
-        generated_at=_utc_now_iso(),
-        total_inventory=total_inventory,
-        total_pushable_inventory=total_pushable_inventory,
-        topic_capacity=qm.topic_capacity,
-        per_topic=per_topic,
-        refill_topics=refill_topics,
-    )
-
-
 def main(argv: list[str] | None = None) -> int:
     del argv
     _configure_logging()
     workdir = Path.cwd()
 
-    if not _QUEUE_JSON.exists():
-        logger.warning("no queue.json — nothing to manage; emitting empty status")
-        config = load_interests(workdir)
-        runtime = load_runtime(workdir)
-        status = _compute_status(
-            Queue(generated_at=_utc_now_iso(), topics={}),
-            {t.topic: t for t in config.interests}, runtime,
-        )
-        atomic_write_json(_QUEUE_STATUS_JSON, status.model_dump())
-        logger.info("queue_status emitted (empty queue)")
-        return 0
-
-    queue = Queue.model_validate(json.loads(_QUEUE_JSON.read_text(encoding="utf-8")))
     config = load_interests(workdir)
     runtime = load_runtime(workdir)
     topic_by_name = {t.topic: t for t in config.interests}
 
-    before = sum(len(v) for v in queue.topics.values())
-    logger.info("queue_manage start: %d items across %d topics", before, len(queue.topics))
+    def manage(queue: Queue) -> tuple[int, int, int, QueueStatus]:
+        before = sum(len(v) for v in queue.topics.values())
+        logger.info("queue_manage start: %d items across %d topics", before, len(queue.topics))
 
-    expired = _expire_stale(queue, topic_by_name, runtime)
-    logger.info("expired %d stale items", expired)
+        expired = _expire_stale(queue, topic_by_name, runtime)
+        logger.info("expired %d stale items", expired)
 
-    video_idx = _load_video_cache_index()
-    image_idx = _load_image_cache_index()
-    permanent_removed = _drop_permanently_failed_media(queue, video_idx, image_idx)
-    logger.info("removed %d permanently failed media items", permanent_removed)
+        video_idx = _load_video_cache_index()
+        image_idx = _load_image_cache_index()
+        permanent_removed = _drop_permanently_failed_media(queue, video_idx, image_idx)
+        logger.info("removed %d permanently failed media items", permanent_removed)
 
-    _sort_topics(queue)
-    queue.generated_at = _utc_now_iso()
+        _sort_topics(queue)
+        queue.generated_at = _utc_now_iso()
+        status = compute_queue_status(queue, topic_by_name, runtime)
+        return before, expired, permanent_removed, status
 
-    status = _compute_status(queue, topic_by_name, runtime)
-
-    atomic_write_json(_QUEUE_JSON, queue.model_dump())
-    atomic_write_json(_QUEUE_STATUS_JSON, status.model_dump())
+    before, _expired, _permanent_removed, status = mutate_queue(
+        manage,
+        topic_by_name=topic_by_name,
+        runtime=runtime,
+    )
 
     after = status.total_inventory
     logger.info(

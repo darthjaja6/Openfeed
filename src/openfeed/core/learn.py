@@ -653,6 +653,8 @@ def main(argv: list[str] | None = None) -> int:
 
     runtime = load_runtime(workdir)
     cfg = runtime.learn
+    interests = load_interests(workdir)
+    topic_by_name = {entry.topic: entry for entry in interests.interests}
 
     state = _load_state()
     catalog = _load_catalog()
@@ -717,7 +719,15 @@ def main(argv: list[str] | None = None) -> int:
         for key in retired_keys
         if (entry := catalog.sources.get(key)) is not None
     )
-    pruned = queue_io.prune_for_retired_sources(retired_keys) if retired_keys else 0
+    pruned = (
+        queue_io.prune_for_retired_sources(
+            retired_keys,
+            topic_by_name=topic_by_name,
+            runtime=runtime,
+        )
+        if retired_keys
+        else 0
+    )
     logger.info(
         "retire pass (cycle %d): %d → rejected, %d queue items pruned",
         state.cycle_num, len(retired_keys), pruned,
@@ -739,7 +749,7 @@ def main(argv: list[str] | None = None) -> int:
         profile = get_user_profile(workdir)
         search_terms = json.loads(_SEARCH_TERMS_PATH.read_text(encoding="utf-8"))
         topic_descriptions = {
-            i.topic: i.description for i in load_interests(workdir).interests
+            i.topic: i.description for i in interests.interests
         }
         runner = GeminiRunner(workdir)
         triggered, updated, failed, kws_added = expand_search_terms(

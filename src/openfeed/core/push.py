@@ -10,15 +10,14 @@ time. Each tick:
   3. **Render phase** (parallel, `render_workers` threads): for items with
      `rendered_card is None`, call `producer.render`. Items already cached
      skip this. Mutates `QueueItem.rendered_card` in place.
-  4. **Checkpoint A**: atomic-rewrite `state/queue.json` so any newly
-     cached `rendered_card` is durable — even if ticlawk dies next, we
-     don't burn LLM tokens twice on the next pickup.
+  4. **Checkpoint A**: update rendered cards through the queue transaction so
+     any newly cached `rendered_card` is durable without overwriting newer
+     supply-side queue additions.
   5. **Push phase** (sequential): for items that have a `rendered_card`,
      call `ticlawk.push_card`. On success, append `HistoryEntry` to
      `ledgers/history.jsonl` and remove the item from queue. On failure,
      the item stays (with cache).
-  6. **Checkpoint B**: atomic-rewrite `state/queue.json` with successful
-     pushes removed.
+  6. **Checkpoint B**: remove successful pushes through the queue transaction.
   7. Remove local mp4 cache files for successfully pushed YouTube/TikTok
      videos that no longer remain active in queue. Ticlawk remote cleanup
      stays in `cleanup_assets`.
@@ -58,12 +57,12 @@ from openfeed.utils import backpressure
 from openfeed.utils import cycle_summary
 from openfeed.utils.logging_setup import configure_task_logging
 from openfeed.utils.media_readiness import queue_item_media_readiness
+from openfeed.utils.queue_io import load_queue, mutate_queue
 from openfeed.utils.state_io import atomic_write_json
 
 
 logger = logging.getLogger("push")
 
-_QUEUE_PATH = Path("state/queue.json")
 _HISTORY_PATH = Path("ledgers/history.jsonl")
 _ASSET_INDEX_PATH = Path("state/video_assets.json")
 _IMAGE_ASSET_INDEX_PATH = Path("state/image_assets.json")
@@ -91,14 +90,77 @@ def _utc_now_iso() -> str:
 
 
 def _load_queue() -> Queue:
-    if not _QUEUE_PATH.exists():
-        return Queue(generated_at=_utc_now_iso(), topics={})
-    return Queue.model_validate(json.loads(_QUEUE_PATH.read_text(encoding="utf-8")))
+    return load_queue()
 
 
-def _save_queue(queue: Queue) -> None:
-    queue.generated_at = _utc_now_iso()
-    atomic_write_json(_QUEUE_PATH, queue.model_dump())
+def _queue_item_by_id(queue: Queue, content_id: str) -> QueueItem | None:
+    for items in queue.topics.values():
+        for item in items:
+            if item.content.content_id == content_id:
+                return item
+    return None
+
+
+def _apply_rendered_cards(
+    picks: list[QueueItem],
+    *,
+    cleared_ids: set[str],
+    topic_by,
+    runtime,
+) -> int:
+    rendered = {
+        pick.content.content_id: pick.rendered_card
+        for pick in picks
+    }
+
+    def apply(latest: Queue) -> int:
+        updated = 0
+        for content_id, payload in rendered.items():
+            item = _queue_item_by_id(latest, content_id)
+            if item is None:
+                continue
+            if item.rendered_card != payload:
+                item.rendered_card = payload
+                updated += 1
+        for content_id in cleared_ids:
+            item = _queue_item_by_id(latest, content_id)
+            if item is None:
+                continue
+            if item.rendered_card is not None:
+                item.rendered_card = None
+                updated += 1
+        return updated
+
+    return mutate_queue(apply, topic_by_name=topic_by, runtime=runtime)
+
+
+def _finalize_pushed_queue(
+    picks: list[QueueItem],
+    *,
+    pushed_ids: set[str],
+    topic_by,
+    runtime,
+) -> Queue:
+    rendered = {
+        pick.content.content_id: pick.rendered_card
+        for pick in picks
+        if pick.content.content_id not in pushed_ids
+    }
+
+    def apply(latest: Queue) -> Queue:
+        for content_id, payload in rendered.items():
+            item = _queue_item_by_id(latest, content_id)
+            if item is not None:
+                item.rendered_card = payload
+        if pushed_ids:
+            for topic, items in latest.topics.items():
+                latest.topics[topic] = [
+                    item for item in items
+                    if item.content.content_id not in pushed_ids
+                ]
+        return latest.model_copy(deep=True)
+
+    return mutate_queue(apply, topic_by_name=topic_by, runtime=runtime)
 
 
 def _load_video_cache_index() -> VideoCacheIndex:
@@ -149,12 +211,6 @@ def _pick_for_topic(
     if n <= 0:
         return []
     return items[:n]
-
-
-def _remove_from_queue(queue: Queue, item: QueueItem) -> None:
-    topic = item.content.topic
-    cid = item.content.content_id
-    queue.topics[topic] = [qi for qi in queue.topics.get(topic, []) if qi.content.content_id != cid]
 
 
 def _queue_video_cache_ids(queue: Queue) -> set[str]:
@@ -523,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
     runtime = load_runtime(workdir)
     cfg = runtime.push
     interests = load_interests(workdir)
+    topic_by = {t.topic: t for t in interests.interests}
 
     # Resolve per-topic consumer + config from openfeed.yaml. Validation
     # already happened at load time (InterestEntry._validate_consumer);
@@ -617,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
     picks_by_topic: dict[str, list[QueueItem]] = {}
     all_picks: list[QueueItem] = []
     media_state_dirty = False
+    cleared_rendered_ids: set[str] = set()
     for topic, n in to_push_by_topic.items():
         topic_items: list[QueueItem] = []
         skipped_reasons: Counter[str] = Counter()
@@ -625,6 +683,7 @@ def main(argv: list[str] | None = None) -> int:
             state = queue_item_media_readiness(qi, video_cache_idx, image_cache_idx)
             if state.stale_rendered_card:
                 qi.rendered_card = None
+                cleared_rendered_ids.add(qi.content.content_id)
                 stale_rendered += 1
                 media_state_dirty = True
             if state.ready:
@@ -649,7 +708,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if not all_picks:
         if media_state_dirty:
-            _save_queue(queue)
+            _apply_rendered_cards(
+                [],
+                cleared_ids=cleared_rendered_ids,
+                topic_by=topic_by,
+                runtime=runtime,
+            )
         logger.info("no eligible items across topics — stopping")
         return 0
     logger.info(
@@ -661,7 +725,6 @@ def main(argv: list[str] | None = None) -> int:
     # actually have something to render. (Cached items skip the LLM but
     # producer.render is still the call site.)
     persona = load_persona(workdir)
-    topic_by = {t.topic: t for t in interests.interests}
     runner = GeminiRunner(workdir)
     producer = get_producer(cfg.producer)
 
@@ -676,7 +739,12 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("render phase done: %d newly rendered", rendered_now)
 
     # ----- Checkpoint A: persist any newly cached rendered_card -----
-    _save_queue(queue)
+    _apply_rendered_cards(
+        all_picks,
+        cleared_ids=cleared_rendered_ids,
+        topic_by=topic_by,
+        runtime=runtime,
+    )
 
     # ----- Push phase: sequential per topic, each batch to its own channel -----
     pushed_ok = 0
@@ -685,6 +753,7 @@ def main(argv: list[str] | None = None) -> int:
     skipped_backpressure = 0
     aborted_remaining = 0
     pushed_video_cache_ids: list[str] = []
+    pushed_ids: set[str] = set()
     for topic, topic_picks in picks_by_topic.items():
         spec = spec_by_topic[topic]
         cc = consumer_config_by_topic[topic]
@@ -722,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
                 rank_score=pick.rank_score,
             )
             _append_history(entry)
-            _remove_from_queue(queue, pick)
+            pushed_ids.add(pick.content.content_id)
             video_cache_id = _pushed_video_cache_id(pick)
             if video_cache_id is not None:
                 pushed_video_cache_ids.append(video_cache_id)
@@ -733,9 +802,14 @@ def main(argv: list[str] | None = None) -> int:
             break
 
     # ----- Checkpoint B: persist queue with successful pushes removed -----
-    _save_queue(queue)
-    _drop_pushed_local_video_cache(pushed_video_cache_ids, queue)
-    queue_size = sum(len(v) for v in queue.topics.values())
+    final_queue = _finalize_pushed_queue(
+        all_picks,
+        pushed_ids=pushed_ids,
+        topic_by=topic_by,
+        runtime=runtime,
+    )
+    _drop_pushed_local_video_cache(pushed_video_cache_ids, final_queue)
+    queue_size = sum(len(v) for v in final_queue.topics.values())
     logger.info(
         "push tick: %d ok / %d push-failed / %d unrendered / %d backpressure-skipped (queue now %d)",
         pushed_ok, pushed_fail, skipped_unrendered, skipped_backpressure, queue_size,

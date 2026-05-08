@@ -65,7 +65,7 @@ from openfeed.utils.content_meta import (
 )
 from openfeed.utils import catalog_io, cycle_summary
 from openfeed.utils.logging_setup import configure_task_logging
-from openfeed.utils.state_io import atomic_write_json
+from openfeed.utils.queue_io import load_queue, mutate_queue
 from openfeed.utils.video_frames import (
     extract_youtube_frames,
     parse_duration_seconds,
@@ -76,7 +76,6 @@ from openfeed.utils.video_frames import (
 logger = logging.getLogger("filter")
 
 _QUEUE_PATROL_DIR = Path("queues/patrol")
-_QUEUE_JSON = Path("state/queue.json")
 _CATALOG_PATH = Path("state/source_catalog.json")
 _LEDGER_PATH = Path("ledgers/decisions.jsonl")
 
@@ -291,18 +290,6 @@ def _save_catalog(catalog: SourceCatalog, topics: set[str]) -> None:
         catalog_io.save_catalog_topic(state_dir, topic, scoped)
 
 
-def _load_or_create_queue() -> Queue:
-    if _QUEUE_JSON.exists():
-        raw = json.loads(_QUEUE_JSON.read_text(encoding="utf-8"))
-        return Queue.model_validate(raw)
-    return Queue(generated_at=_utc_now_iso(), topics={})
-
-
-def _save_queue(queue: Queue) -> None:
-    queue.generated_at = _utc_now_iso()
-    atomic_write_json(_QUEUE_JSON, queue.model_dump())
-
-
 def _load_patrol_items() -> list[tuple[Path, ContentItem]]:
     if not _QUEUE_PATROL_DIR.exists():
         return []
@@ -501,7 +488,7 @@ def main(argv: list[str] | None = None) -> int:
     runner = GeminiRunner(workdir)
 
     catalog = _load_catalog()
-    queue = _load_or_create_queue()
+    queue = load_queue()
     blocklist = load_content_blocklist(queue)
 
     patrol_items = _load_patrol_items()
@@ -752,16 +739,6 @@ def main(argv: list[str] | None = None) -> int:
     # the result back onto QueueItem.rendered_card. Failed pushes leave
     # the cache for the next pickup so LLM tokens are spent at most once.
     # --------------------------------------------------------------
-    for fp, item, source, score in admitted_items:
-        queue.topics.setdefault(item.topic, []).append(
-            QueueItem(
-                content=item, score=score,
-                rank_score=score.composite,
-                admitted_at=_utc_now_iso(),
-            )
-        )
-        fp.unlink(missing_ok=True)
-
     # --------------------------------------------------------------
     # EMA-update admission_rate per source + filter-retire bookkeeping.
     # Source retire here covers the "patrol kept returning items but filter
@@ -813,14 +790,8 @@ def main(argv: list[str] | None = None) -> int:
     # Drop any in-flight queue items belonging to a freshly-retired source so
     # push doesn't keep flushing them after we've decided the source is bad.
     if retired_keys:
-        for key in retired_keys:
-            for topic_items in queue.topics.values():
-                topic_items[:] = [
-                    it for it in topic_items
-                    if f"{it.content.platform}:{it.content.source_id}:{it.content.topic}" != key
-                ]
         logger.info(
-            "filter-retire pass: %d sources flipped to rejected; queue items pruned in-memory",
+            "filter-retire pass: %d sources flipped to rejected; queued items will be pruned in the queue transaction",
             len(retired_keys),
         )
 
@@ -830,19 +801,73 @@ def main(argv: list[str] | None = None) -> int:
         if (entry := catalog.sources.get(key)) is not None
     }
     _save_catalog(catalog, touched_topics)
-    _save_queue(queue)
+
+    admitted_by_id = {
+        item.content_id: (fp, item, score)
+        for fp, item, _source, score in admitted_items
+    }
+    retired = set(retired_keys)
+
+    def apply_queue_updates(latest: Queue) -> tuple[int, int, int]:
+        existing_ids = {
+            qi.content.content_id
+            for topic_items in latest.topics.values()
+            for qi in topic_items
+        }
+        enqueued = 0
+        duplicates = 0
+        for content_id, (_fp, item, score) in admitted_by_id.items():
+            if content_id in existing_ids:
+                duplicates += 1
+                continue
+            latest.topics.setdefault(item.topic, []).append(
+                QueueItem(
+                    content=item,
+                    score=score,
+                    rank_score=score.composite,
+                    admitted_at=_utc_now_iso(),
+                )
+            )
+            existing_ids.add(content_id)
+            enqueued += 1
+
+        pruned = 0
+        if retired:
+            for topic, topic_items in latest.topics.items():
+                kept = [
+                    it for it in topic_items
+                    if f"{it.content.platform}:{it.content.source_id}:{it.content.topic}"
+                    not in retired
+                ]
+                pruned += len(topic_items) - len(kept)
+                latest.topics[topic] = kept
+        return enqueued, duplicates, pruned
+
+    enqueued, duplicate_admits, queue_pruned = mutate_queue(
+        apply_queue_updates,
+        topic_by_name=topic_by_name,
+        runtime=runtime,
+    )
+    for fp, _item, _source, _score in admitted_items:
+        fp.unlink(missing_ok=True)
+    if duplicate_admits or queue_pruned:
+        logger.info(
+            "queue transaction: enqueued=%d duplicate_admits=%d pruned_retired_items=%d",
+            enqueued, duplicate_admits, queue_pruned,
+        )
+    final_queue = load_queue()
 
     logger.info("filter_ok: %s", dict(stats))
     logger.info(
         "queue now: %d topics, %d total items",
-        len(queue.topics), sum(len(v) for v in queue.topics.values()),
+        len(final_queue.topics), sum(len(v) for v in final_queue.topics.values()),
     )
     cycle_summary.add(
         "filter",
         admitted=stats.get("admit", 0),
         rejected=sum(v for k, v in stats.items() if k != "admit"),
         sources_filter_retired=len(retired_keys),
-        queue_size=sum(len(v) for v in queue.topics.values()),
+        queue_size=sum(len(v) for v in final_queue.topics.values()),
     )
     return 0
 
