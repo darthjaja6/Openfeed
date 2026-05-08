@@ -87,8 +87,8 @@ class OpenCLIError(RuntimeError):
 class OpenCLIInfraError(OpenCLIError):
     """Infrastructure failure — the opencli toolchain itself is unavailable
     (Browser Bridge extension not connected, Chrome not running, daemon
-    timeout, etc). Caller should abort-and-retry-later rather than skip and
-    move on, because every subsequent call will fail the same way."""
+    unavailable, etc). Caller should abort-and-retry-later rather than skip
+    and move on, because every subsequent call will fail the same way."""
     pass
 
 
@@ -143,7 +143,7 @@ def _run_once(args: list[str], *, timeout: int) -> Any:
                 full_args, capture_output=True, text=True, timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            raise OpenCLIInfraError(
+            raise OpenCLIError(
                 f"opencli {' '.join(args)} timed out after {timeout}s"
             ) from exc
     stdout = (result.stdout or "").strip()

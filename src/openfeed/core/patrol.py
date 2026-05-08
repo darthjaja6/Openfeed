@@ -114,6 +114,24 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _mark_source_exhausted(
+    row: SourceEntry,
+    runtime: RuntimeConfig,
+    *,
+    reason: str,
+    patrolled_at: str | None = None,
+) -> None:
+    patrolled_at = patrolled_at or _utc_now_iso()
+    retry_at = (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=runtime.queue_manage.source_exhausted_retry_seconds)
+    ).replace(microsecond=0).isoformat()
+    row.last_patrolled_at = patrolled_at
+    row.metadata = dict(row.metadata)
+    row.metadata["exhausted_until"] = retry_at
+    row.metadata["exhausted_reason"] = reason
+
+
 def _fetched_at_stamp() -> str:
     """Compact timestamp for filenames: YYYYMMDDTHHMMSS (UTC)."""
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
@@ -682,6 +700,9 @@ def main(argv: list[str] | None = None) -> int:
                     reason_code="patrol_failed",
                     evidence={"error": f"{type(exc).__name__}: {str(exc)[:200]}"},
                 )
+                row = catalog.sources.get(source.catalog_key)
+                if row is not None:
+                    _mark_source_exhausted(row, runtime, reason="patrol_failed")
                 n_fail += 1
                 continue
             written_for_source = 0
@@ -697,12 +718,12 @@ def main(argv: list[str] | None = None) -> int:
             row.last_patrolled_at = patrolled_at
             row.metadata = dict(row.metadata)
             if written_for_source == 0:
-                retry_at = (
-                    datetime.now(timezone.utc)
-                    + timedelta(seconds=runtime.queue_manage.source_exhausted_retry_seconds)
-                ).replace(microsecond=0).isoformat()
-                row.metadata["exhausted_until"] = retry_at
-                row.metadata["exhausted_reason"] = "no_new_items"
+                _mark_source_exhausted(
+                    row,
+                    runtime,
+                    reason="no_new_items",
+                    patrolled_at=patrolled_at,
+                )
             else:
                 row.metadata.pop("exhausted_until", None)
                 row.metadata.pop("exhausted_reason", None)
