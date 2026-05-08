@@ -19,6 +19,9 @@ affected process.
 | `youtube.results_per_keyword` | 2 | opencli search results per keyword (soft target; oversampled) |
 | `youtube.oversample_multiplier` | 10 | Pull `results_per_keyword × this`; every survivor goes to LLM review |
 | `youtube.min_subscribers` | 1000 | Hard gate before LLM review |
+| `tiktok.keywords_per_topic` | 10 | How many TikTok-native seed terms to use per topic |
+| `tiktok.results_per_keyword` | 5 | TikTok search videos per keyword; unique creators go to source review |
+| `tiktok.max_candidates_per_tick` | `null` | No production cap on creator review; set locally only for development throttling |
 | `x.min_followers` | 500 | Hard gate for X authors |
 | `web.min_feed_entries` | 5 | Skip empty/skeleton feeds |
 | `web.max_age_days` | 90 | Skip dead blogs (most-recent post older than this) |

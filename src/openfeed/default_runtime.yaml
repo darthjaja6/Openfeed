@@ -15,9 +15,9 @@ discover:
     min_feed_entries: 5
     max_age_days: 90
   tiktok:
-    keywords_per_topic: 2
-    results_per_keyword: 4
-    max_candidates_per_tick: 4
+    keywords_per_topic: 10
+    results_per_keyword: 5
+    max_candidates_per_tick: null
     min_followers: 0
     min_videos: 1
 patrol:
