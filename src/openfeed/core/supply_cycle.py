@@ -13,8 +13,8 @@ The `bootstrap_missing` step picks ONE source-missing (topic, platform) slot
 per tick, seeds keywords if that slot has none, then runs scoped discover.
 This lets a new platform be added to an existing topic without rebuilding the
 rest of the topic. `starvation_discover` is a bounded escalation for topics
-with zero pushable inventory; it runs at most one scoped topic discover per
-tick and backs off per topic.
+whose active sources are under floor but temporarily exhausted; it runs at
+most one scoped topic discover per tick and backs off per topic.
 """
 from __future__ import annotations
 
@@ -92,10 +92,12 @@ def _topic_demand_priority(status: QueueStatus | None, topic: str) -> tuple[int,
     topic_status = status.per_topic.get(topic)
     if topic_status is None:
         return (2, 0)
-    if topic_status.refill_gap > 0 and topic_status.pushable_inventory == 0:
-        return (0, -topic_status.refill_gap)
-    if topic_status.refill_gap > 0:
-        return (1, -topic_status.refill_gap)
+    if topic_status.active_source_count == 0:
+        return (0, 0)
+    if topic_status.refill_source_count > 0 and topic_status.pushable_count == 0:
+        return (0, -topic_status.refill_source_count)
+    if topic_status.refill_source_count > 0:
+        return (1, -topic_status.refill_source_count)
     return (2, 0)
 
 
@@ -229,7 +231,7 @@ def _seconds_since(iso_value: str | None) -> float | None:
 
 
 def _starvation_discover(_argv: list[str] | None = None) -> int:
-    """Bounded refill escalation for topics with zero pushable inventory.
+    """Bounded refill escalation for source-floor starvation.
 
     Runs at most one scoped topic discover per tick, with a per-topic backoff.
     It is deliberately not a loop-until-success path.
@@ -247,8 +249,9 @@ def _starvation_discover(_argv: list[str] | None = None) -> int:
         topic
         for topic, topic_status in status.per_topic.items()
         if topic in configured_topics
-        and topic_status.refill_gap > 0
-        and topic_status.pushable_inventory == 0
+        and topic_status.pushable_count == 0
+        and topic_status.under_floor_source_count > 0
+        and topic_status.refill_source_count == 0
     )
     if not starved:
         return 0
@@ -270,7 +273,7 @@ def _starvation_discover(_argv: list[str] | None = None) -> int:
         return 0
 
     logger.info(
-        "starvation_discover: %s has zero pushable inventory; invoking discover --topic",
+        "starvation_discover: %s has no refillable source inventory; invoking discover --topic",
         target,
     )
     try:

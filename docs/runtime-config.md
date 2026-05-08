@@ -54,8 +54,8 @@ affected process.
 
 | field | default | meaning |
 |---|---|---|
-| `topic_floor` | 3 | Per-topic minimum inventory; below → refill signal to patrol |
-| `topic_capacity` | 5 | Per-topic target inventory; each topic refills independently |
+| `source_floor` | 10 | Per-active-source metadata floor; sources below this are refilled |
+| `source_exhausted_retry_seconds` | 21600 | Temporary skip window after patrol finds no new items for a source |
 
 ## `push`
 
@@ -67,6 +67,7 @@ affected process.
 | `tick_budget_seconds` | 30 | Wall-clock cap for render+push per tick |
 | `render_workers` | 4 | Render threadpool size for lazy render |
 
+Supply is driven by per-source metadata floors, not topic total inventory.
 Source diversity is applied by `queue_manage` when it creates the canonical
 per-topic queue order. `push` scans that order and does not run a second
 source-spacing scheduler.

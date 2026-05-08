@@ -30,7 +30,7 @@ import logging
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -546,21 +546,20 @@ def main(argv: list[str] | None = None) -> int:
         active = [s for s in active if s.platform == args.platform]
 
     # Consult queue_manage's signals. Cold start (no file) falls through to
-    # "patrol everything"; otherwise restrict to refill_topics so API quota
-    # is spent on topics that actually need stock.
+    # "patrol everything"; otherwise restrict to source-level refill signals
+    # so API quota is spent only on active sources below metadata floor.
     status = None if (args.topic or args.platform) else _load_queue_status()
     if status is not None:
-        refill_set = set(status.refill_topics)
+        refill_set = set(status.refill_sources)
         if not refill_set:
             logger.info(
-                "all topic queues at target (total=%d) — skipping patrol cycle",
-                status.total_inventory,
+                "all active sources at metadata floor or temporarily exhausted — skipping patrol cycle",
             )
             return 0
-        active = [s for s in active if s.topic in refill_set]
+        active = [s for s in active if s.catalog_key in refill_set]
         logger.info(
-            "refill cycle: %d sources across topics %s",
-            len(active), sorted(refill_set),
+            "refill cycle: %d under-floor source(s)",
+            len(active),
         )
     else:
         if args.topic or args.platform:
@@ -685,20 +684,32 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 n_fail += 1
                 continue
+            written_for_source = 0
             for item in items:
                 if item.content_id in existing_ids:
                     continue  # belt-and-suspenders vs races across same-run sources
                 _write_queue_item(item)
                 existing_ids.add(item.content_id)
                 n_new += 1
+                written_for_source += 1
             row = catalog.sources[source.catalog_key]
             patrolled_at = _utc_now_iso()
             row.last_patrolled_at = patrolled_at
+            row.metadata = dict(row.metadata)
+            if written_for_source == 0:
+                retry_at = (
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=runtime.queue_manage.source_exhausted_retry_seconds)
+                ).replace(microsecond=0).isoformat()
+                row.metadata["exhausted_until"] = retry_at
+                row.metadata["exhausted_reason"] = "no_new_items"
+            else:
+                row.metadata.pop("exhausted_until", None)
+                row.metadata.pop("exhausted_reason", None)
             if _should_mark_tiktok_backfilled(
                 source,
                 max_age_map.get((source.topic, source.platform)),
             ):
-                row.metadata = dict(row.metadata)
                 row.metadata["tiktok_backfilled_at"] = patrolled_at
                 row.metadata["tiktok_backfill_page_size"] = (
                     runtime.patrol.tiktok.max_items_per_source

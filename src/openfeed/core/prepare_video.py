@@ -221,17 +221,18 @@ def _topic_priority(topic: str, status: QueueStatus | None) -> tuple[int, int, i
     topic_status = status.per_topic.get(topic)
     if topic_status is None:
         return (0, 0, 0, 0)
-    pushable = topic_status.pushable_inventory
-    blocked = topic_status.blocked_inventory
-    if pushable == 0 and topic_status.refill_gap > 0:
+    pushable = topic_status.pushable_count
+    blocked = topic_status.blocked_count
+    source_gap = topic_status.refill_source_count
+    if pushable == 0 and source_gap > 0:
         tier = 3
-    elif topic_status.refill_gap > 0:
+    elif source_gap > 0:
         tier = 2
     elif blocked > 0:
         tier = 1
     else:
         tier = 0
-    return (tier, topic_status.refill_gap, -pushable, blocked)
+    return (tier, source_gap, -pushable, blocked)
 
 
 def _ordered_topics(topics: list[str], status: QueueStatus | None) -> list[str]:

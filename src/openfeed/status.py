@@ -222,10 +222,19 @@ def main(argv: list[str] | None = None) -> int:
         status = _load_queue_status()
         if status is not None:
             print(
-                "- pushable inventory: "
-                f"{status.total_pushable_inventory}/{status.total_inventory}"
+                "- source inventory: "
+                f"floor={status.source_floor} "
+                f"pushable={status.total_pushable_count}/{status.total_queued_count} "
+                f"refill_sources={len(status.refill_sources)}"
             )
-            print(f"- refill topics: {status.refill_topics}")
+            for topic, topic_status in sorted(status.per_topic.items()):
+                print(
+                    "  "
+                    f"{topic}: active={topic_status.active_source_count} "
+                    f"under_floor={topic_status.under_floor_source_count} "
+                    f"refill={topic_status.refill_source_count} "
+                    f"exhausted={topic_status.exhausted_source_count}"
+                )
 
         patrol_files = len(list(_PATROL_DIR.glob("*.json"))) if _PATROL_DIR.exists() else 0
         print(f"- patrol queue: {patrol_files} file(s)")

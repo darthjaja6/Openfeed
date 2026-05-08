@@ -1,4 +1,4 @@
-"""Queue management — per-topic inventory signalling (PRD §5.4).
+"""Queue management — per-source inventory signalling.
 
 Idempotent post-pass over `state/queue.json`:
 
@@ -7,14 +7,11 @@ Idempotent post-pass over `state/queue.json`:
      Emit a `reject_content / expired_in_queue` judgment so the filter
      blocklist catches them if they ever re-appear in a patrol batch.
   2. Sort each topic bucket by `rank_score` descending (push reads top-K).
-  3. Compute per-topic inventory + `refill_gap = max(0, target - inventory)`
-     where `target = max(topic_floor, topic_capacity)`.
-  4. Emit `state/queue_status.json`:
-       - `refill_topics`: positive-gap topics, ordered gap-desc — patrol
-         consults this to prioritise which (topic, platform) to refresh
+  3. Compute per-source queued/pushable inventory for every active source.
+  4. Emit `state/queue_status.json` with `refill_sources`: active,
+     non-exhausted sources below the metadata floor.
 
-This module does **not** do selection / diversity / per-user capping — that
-is push's job (§5.5).
+Topic total inventory is informational only; supply is source-floor driven.
 """
 from __future__ import annotations
 
@@ -277,20 +274,25 @@ def main(argv: list[str] | None = None) -> int:
         runtime=runtime,
     )
 
-    after = status.total_inventory
+    after = status.total_queued_count
     logger.info(
-        "queue_manage_ok: %d → %d items; refill_topics=%s",
-        before, after, status.refill_topics,
+        "queue_manage_ok: %d → %d items; refill_sources=%d source_floor=%d",
+        before, after, len(status.refill_sources), status.source_floor,
     )
-    for topic, s in sorted(status.per_topic.items(), key=lambda kv: -kv[1].refill_gap):
+    for topic, s in sorted(
+        status.per_topic.items(),
+        key=lambda kv: (-kv[1].refill_source_count, kv[0]),
+    ):
         logger.info(
-            "  %-12s inv=%-3d pushable=%-3d blocked=%-3d target=%-3d gap=%-3d",
+            "  %-12s queued=%-4d pushable=%-4d blocked=%-4d active_sources=%-3d under_floor=%-3d refill_sources=%-3d exhausted=%-3d",
             topic,
-            s.inventory,
-            s.pushable_inventory,
-            s.blocked_inventory,
-            s.target,
-            s.refill_gap,
+            s.queued_count,
+            s.pushable_count,
+            s.blocked_count,
+            s.active_source_count,
+            s.under_floor_source_count,
+            s.refill_source_count,
+            s.exhausted_source_count,
         )
     return 0
 

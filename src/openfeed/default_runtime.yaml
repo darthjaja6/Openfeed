@@ -60,8 +60,8 @@ filter:
     allow_photo: true
     min_photo_count: 1
 queue_manage:
-  topic_floor: 3
-  topic_capacity: 5
+  source_floor: 10
+  source_exhausted_retry_seconds: 21600
 push:
   target_buffer: 3
   max_per_tick: 3

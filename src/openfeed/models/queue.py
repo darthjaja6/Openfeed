@@ -34,29 +34,47 @@ class Queue(BaseModel):
     topics: dict[str, list[QueueItem]] = Field(default_factory=dict)
 
 
-class TopicStatus(BaseModel):
-    """Inventory snapshot for one topic, produced by queue_manage."""
+class SourceInventoryStatus(BaseModel):
+    """Inventory snapshot for one active source, produced by queue_manage."""
     model_config = ConfigDict(extra="forbid")
-    inventory: int          # current count after expiration/resort
-    pushable_inventory: int  # currently pushable without waiting for media prep
-    blocked_inventory: int   # queued but not pushable yet
-    target: int             # per-topic target (max(floor, topic_capacity))
-    refill_gap: int         # max(0, target - pushable_inventory); ≥1 → refill signal
-    floor: int              # floor that applied (copied from runtime)
+    topic: str
+    platform: str
+    source_id: str
+    queued_count: int
+    pushable_count: int
+    blocked_count: int
+    source_floor: int
+    refill_gap: int
+    needs_refill: bool
+    exhausted_until: str | None = None
+    exhausted_reason: str | None = None
+    last_patrolled_at: str | None = None
+
+
+class TopicStatus(BaseModel):
+    """Informational rollup for one topic.
+
+    Supply decisions are source-level; these topic fields are for status,
+    prioritisation, and discover escalation only.
+    """
+    model_config = ConfigDict(extra="forbid")
+    queued_count: int
+    pushable_count: int
+    blocked_count: int
+    active_source_count: int
+    under_floor_source_count: int
+    refill_source_count: int
+    exhausted_source_count: int
 
 
 class QueueStatus(BaseModel):
-    """state/queue_status.json — queue_manage's output signal file.
-
-    Consumed by patrol (to decide whether to collect and which topics to
-    prioritise). Filter doesn't read this — it already processes whatever
-    arrives in `queues/patrol/`."""
+    """state/queue_status.json — queue_manage's source-level signal file."""
     model_config = ConfigDict(extra="forbid")
     generated_at: str
-    total_inventory: int
-    total_pushable_inventory: int
-    topic_capacity: int
+    source_floor: int
+    total_queued_count: int
+    total_pushable_count: int
     per_topic: dict[str, TopicStatus]
-    # Topics with refill_gap > 0, ordered gap-desc. Patrol should prefer
-    # these when choosing which (topic, platform) slots to refresh.
-    refill_topics: list[str]
+    per_source: dict[str, SourceInventoryStatus]
+    # Active, non-exhausted sources below source_floor, ordered by gap desc.
+    refill_sources: list[str]

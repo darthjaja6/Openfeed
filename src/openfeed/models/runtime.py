@@ -146,16 +146,16 @@ class FilterConfig(BaseModel):
 
 
 class QueueManageConfig(BaseModel):
-    """Per-topic inventory signalling.
+    """Per-source inventory signalling for supply.
 
-    `topic_floor` — each topic must hold at least this many items; falling
-    below triggers a refill signal for that topic.
-    `topic_capacity` — target inventory for each topic bucket. There is no
-    global queue pause; a full topic can sit full while another refills.
+    `source_floor` — every active source should keep at least this many queued
+    metadata items. Supply refills sources below this floor.
+    `source_exhausted_retry_seconds` — temporary skip window after patrol finds
+    no new content for a source.
     """
     model_config = ConfigDict(extra="forbid")
-    topic_floor: int
-    topic_capacity: int
+    source_floor: int
+    source_exhausted_retry_seconds: int
 
 
 class PushConfig(BaseModel):

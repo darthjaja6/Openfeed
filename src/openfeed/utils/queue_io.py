@@ -13,15 +13,18 @@ from __future__ import annotations
 import fcntl
 import json
 from contextlib import contextmanager
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, TypeVar
 
 from openfeed.models.image_cache import ImageCacheIndex
 from openfeed.models.interests import InterestEntry
-from openfeed.models.queue import Queue, QueueStatus, TopicStatus
+from openfeed.models.queue import Queue, QueueStatus, SourceInventoryStatus, TopicStatus
 from openfeed.models.runtime import RuntimeConfig
+from openfeed.models.source import make_catalog_key
 from openfeed.models.video_cache import VideoCacheIndex
+from openfeed.utils import catalog_io
 from openfeed.utils.media_readiness import queue_item_media_readiness
 from openfeed.utils.state_io import atomic_write_json
 
@@ -36,6 +39,15 @@ T = TypeVar("T")
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 @contextmanager
@@ -84,44 +96,122 @@ def compute_queue_status(
     runtime: RuntimeConfig,
 ) -> QueueStatus:
     qm = runtime.queue_manage
-    target = max(qm.topic_floor, qm.topic_capacity)
     video_idx = _load_video_cache_index()
     image_idx = _load_image_cache_index()
+    catalog = catalog_io.load_catalog(Path("state"))
+    now = datetime.now(timezone.utc)
 
-    total_inventory = sum(len(v) for v in queue.topics.values())
-    total_pushable_inventory = 0
+    queued_by_source: Counter[str] = Counter()
+    pushable_by_source: Counter[str] = Counter()
+    total_queued_count = 0
+    total_pushable_count = 0
+    for items in queue.topics.values():
+        for qi in items:
+            key = make_catalog_key(
+                qi.content.platform,
+                qi.content.source_id,
+                qi.content.topic,
+            )
+            queued_by_source[key] += 1
+            total_queued_count += 1
+            if queue_item_media_readiness(qi, video_idx, image_idx).ready:
+                pushable_by_source[key] += 1
+                total_pushable_count += 1
+
+    per_source: dict[str, SourceInventoryStatus] = {}
+    refill_sources: list[str] = []
+    per_topic_counts: dict[str, dict[str, int]] = {
+        topic: {
+            "queued": 0,
+            "pushable": 0,
+            "blocked": 0,
+            "active": 0,
+            "under_floor": 0,
+            "refill": 0,
+            "exhausted": 0,
+        }
+        for topic in topic_by_name
+    }
+    for source in catalog.sources.values():
+        if source.status != "active" or source.topic not in topic_by_name:
+            continue
+        key = source.catalog_key
+        queued = queued_by_source[key]
+        pushable = pushable_by_source[key]
+        blocked = queued - pushable
+        gap = max(0, qm.source_floor - queued)
+        metadata = source.metadata or {}
+        exhausted_until = metadata.get("exhausted_until")
+        exhausted_reason = metadata.get("exhausted_reason")
+        exhausted_dt = _parse_iso(exhausted_until if isinstance(exhausted_until, str) else None)
+        is_exhausted = exhausted_dt is not None and exhausted_dt > now
+        needs_refill = gap > 0 and not is_exhausted
+        per_source[key] = SourceInventoryStatus(
+            topic=source.topic,
+            platform=source.platform,
+            source_id=source.source_id,
+            queued_count=queued,
+            pushable_count=pushable,
+            blocked_count=blocked,
+            source_floor=qm.source_floor,
+            refill_gap=gap,
+            needs_refill=needs_refill,
+            exhausted_until=exhausted_until if is_exhausted else None,
+            exhausted_reason=exhausted_reason if is_exhausted else None,
+            last_patrolled_at=source.last_patrolled_at,
+        )
+        counts = per_topic_counts.setdefault(source.topic, {
+            "queued": 0,
+            "pushable": 0,
+            "blocked": 0,
+            "active": 0,
+            "under_floor": 0,
+            "refill": 0,
+            "exhausted": 0,
+        })
+        counts["active"] += 1
+        counts["queued"] += queued
+        counts["pushable"] += pushable
+        counts["blocked"] += blocked
+        if gap > 0:
+            counts["under_floor"] += 1
+        if is_exhausted:
+            counts["exhausted"] += 1
+        if needs_refill:
+            counts["refill"] += 1
+            refill_sources.append(key)
+
     per_topic: dict[str, TopicStatus] = {}
     for topic in topic_by_name:
-        items = queue.topics.get(topic, [])
-        inv = len(items)
-        pushable = sum(
-            1 for qi in items
-            if queue_item_media_readiness(qi, video_idx, image_idx).ready
-        )
-        total_pushable_inventory += pushable
-        blocked = inv - pushable
-        gap = max(0, target - pushable)
+        counts = per_topic_counts.get(topic) or {}
         per_topic[topic] = TopicStatus(
-            inventory=inv,
-            pushable_inventory=pushable,
-            blocked_inventory=blocked,
-            target=target,
-            refill_gap=gap,
-            floor=qm.topic_floor,
+            queued_count=counts.get("queued", 0),
+            pushable_count=counts.get("pushable", 0),
+            blocked_count=counts.get("blocked", 0),
+            active_source_count=counts.get("active", 0),
+            under_floor_source_count=counts.get("under_floor", 0),
+            refill_source_count=counts.get("refill", 0),
+            exhausted_source_count=counts.get("exhausted", 0),
         )
 
-    refill_topics = sorted(
-        [t for t, s in per_topic.items() if s.refill_gap > 0],
-        key=lambda t: per_topic[t].refill_gap,
+    refill_sources.sort(
+        key=lambda key: (
+            per_source[key].refill_gap,
+            -per_source[key].queued_count,
+            per_source[key].topic,
+            per_source[key].platform,
+            per_source[key].source_id,
+        ),
         reverse=True,
     )
     return QueueStatus(
         generated_at=_utc_now_iso(),
-        total_inventory=total_inventory,
-        total_pushable_inventory=total_pushable_inventory,
-        topic_capacity=qm.topic_capacity,
+        source_floor=qm.source_floor,
+        total_queued_count=total_queued_count,
+        total_pushable_count=total_pushable_count,
         per_topic=per_topic,
-        refill_topics=refill_topics,
+        per_source=per_source,
+        refill_sources=refill_sources,
     )
 
 
