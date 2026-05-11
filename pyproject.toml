@@ -39,10 +39,11 @@ openfeed-topic-reconcile = "openfeed.core.topic_reconcile:main"
 openfeed-local-server = "openfeed.clients.consumer.local_web:main"
 openfeed-smoke-publish = "openfeed.smoke_publish:main"
 openfeed-status = "openfeed.status:main"
+openfeed-opencli-service = "openfeed.opencli_service.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["openfeed*"]
 
 [tool.setuptools.package-data]
-openfeed = ["default_runtime.yaml"]
+openfeed = ["default_runtime.yaml", "opencli_service/default_config.yaml"]

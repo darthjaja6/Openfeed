@@ -35,6 +35,7 @@ openfeed.yaml
 
 # Working scratchpad (one-shot scripts, manual probes, dump files)
 tmp/
+scratch/
 
 # Output of test runs / scratch downloads
 /tmp_*
@@ -49,4 +50,5 @@ uv.lock
 
 # Agent files (private notes for codex / Claude Code; not part of public repo)
 /AGENTS.md
+/agents.md
 /CLAUDE.md

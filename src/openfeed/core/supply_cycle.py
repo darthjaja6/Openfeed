@@ -40,18 +40,18 @@ from openfeed.core.interest_bootstrap import generate_keywords_per_platform
 from openfeed.models.interests import InterestsConfig, load_interests
 from openfeed.models.persona import PersonaOutput
 from openfeed.models.queue import QueueStatus, SourceInventoryStatus
-from openfeed.utils import cycle_summary
+from openfeed.models.runtime import load_runtime
+from openfeed.utils import backpressure, cycle_summary
 from openfeed.utils import catalog_io
 from openfeed.utils.logging_setup import configure_task_logging
 from openfeed.utils.state_io import atomic_write_json
 
 
 logger = logging.getLogger("supply_cycle")
-_BOOTSTRAP_DID_WORK = False
+_DISCOVER_DID_WORK = False
 _ESCALATION_PATH = Path("state/supply_escalation.json")
 _STARVED_DISCOVER_BACKOFF_SECONDS = 6 * 60 * 60
 _LIVE_SOURCE_DISCOVER_BACKOFF_SECONDS = 6 * 60 * 60
-_MIN_LIVE_SOURCES_PER_SLOT = 4
 
 
 def _load_json(path: Path) -> dict:
@@ -75,6 +75,35 @@ def _search_terms_for_slot(search_terms: dict, topic: str, platform: str) -> lis
         .get("keywords")
         or []
     )
+
+
+def _ensure_keywords_for_slot(
+    *,
+    config: InterestsConfig,
+    existing: dict,
+    keywords_path: Path,
+    topic: str,
+    platform: str,
+) -> tuple[dict, int]:
+    keywords = _search_terms_for_slot(existing, topic, platform)
+    if keywords:
+        return existing, len(keywords)
+    target_entry = next(t for t in config.interests if t.topic == topic)
+    runner = GeminiRunner(Path.cwd())
+    persona = PersonaOutput.model_validate(config.persona)
+    sliced = InterestsConfig(persona=config.persona, interests=[target_entry])
+    new_keywords = generate_keywords_per_platform(
+        sliced, persona, [], runner,
+        only_slots={(topic, platform)},
+    )
+    merged = merge_search_terms(config, existing, new_keywords)
+    atomic_write_json(keywords_path, merged)
+    keyword_count = len(_search_terms_for_slot(merged, topic, platform))
+    logger.info(
+        "seeded %d keywords for %s/%s",
+        keyword_count, topic, platform,
+    )
+    return merged, keyword_count
 
 
 def _active_source_counts(workdir: Path) -> dict[tuple[str, str], int]:
@@ -114,8 +143,10 @@ def _bootstrap_missing(_argv: list[str] | None = None) -> int:
     discover fails, logs and returns 0 anyway — we don't want a transient
     discover failure to abort the rest of the supply tick.
     """
-    global _BOOTSTRAP_DID_WORK
-    _BOOTSTRAP_DID_WORK = False
+    global _DISCOVER_DID_WORK
+    if _DISCOVER_DID_WORK:
+        logger.info("bootstrap_missing: skipped; discover already ran this tick")
+        return 0
     workdir = Path.cwd()
     config = load_interests(workdir)
     keywords_path = workdir / "state" / "search_terms.json"
@@ -163,21 +194,12 @@ def _bootstrap_missing(_argv: list[str] | None = None) -> int:
 
     # ----- step 1: scoped LLM keyword seed (mirrors tmp/scoped_seed_*.py) -----
     if keyword_count == 0:
-        runner = GeminiRunner(workdir)
-        persona = PersonaOutput.model_validate(config.persona)
-        sliced = InterestsConfig(persona=config.persona, interests=[target_entry])
-        new_keywords = generate_keywords_per_platform(
-            sliced, persona, [], runner,
-            only_slots={(target_name, target_platform)},
-        )
-        merged = merge_search_terms(config, existing, new_keywords)
-        atomic_write_json(keywords_path, merged)
-        keyword_count = len(
-            (merged.get("topics") or {})
-            .get(target_name, {})
-            .get(target_platform, {})
-            .get("keywords")
-            or []
+        existing, keyword_count = _ensure_keywords_for_slot(
+            config=config,
+            existing=existing,
+            keywords_path=keywords_path,
+            topic=target_name,
+            platform=target_platform,
         )
         logger.info(
             "bootstrap_missing: seeded %d keywords for %s/%s",
@@ -207,7 +229,7 @@ def _bootstrap_missing(_argv: list[str] | None = None) -> int:
             target_name, target_platform,
         )
         return 0  # don't abort the rest of the supply tick
-    _BOOTSTRAP_DID_WORK = True
+    _DISCOVER_DID_WORK = True
     logger.info(
         "bootstrap_missing: discover --topic %r --platform %s → rc=%d",
         target_name, target_platform, rc,
@@ -238,8 +260,9 @@ def _starvation_discover(_argv: list[str] | None = None) -> int:
     Runs at most one scoped topic discover per tick, with a per-topic backoff.
     It is deliberately not a loop-until-success path.
     """
-    if _BOOTSTRAP_DID_WORK:
-        logger.info("starvation_discover: skipped; bootstrap already ran this tick")
+    global _DISCOVER_DID_WORK
+    if _DISCOVER_DID_WORK:
+        logger.info("starvation_discover: skipped; discover already ran this tick")
         return 0
 
     status = _load_queue_status()
@@ -287,6 +310,7 @@ def _starvation_discover(_argv: list[str] | None = None) -> int:
         return 0
     by_topic[target] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     atomic_write_json(_ESCALATION_PATH, state)
+    _DISCOVER_DID_WORK = True
     logger.info("starvation_discover: discover --topic %r → rc=%d", target, rc)
     return 0
 
@@ -305,17 +329,23 @@ def _live_source_discover(_argv: list[str] | None = None) -> int:
     `active` means catalog-approved. It does not mean the source still has
     content in the queue. This step focuses on slots that are actually feeding
     the queue now but have too few stocked sources, then runs one scoped
-    discover per supply cycle.
+    discover per supply cycle. The per-platform quota is static runtime
+    config: slow saturated platforms can stay conservative while idle
+    platforms can catch up.
     """
-    if _BOOTSTRAP_DID_WORK:
-        logger.info("live_source_discover: skipped; bootstrap already ran this tick")
+    global _DISCOVER_DID_WORK
+    if _DISCOVER_DID_WORK:
+        logger.info("live_source_discover: skipped; discover already ran this tick")
         return 0
 
     status = _load_queue_status()
     if status is None:
         return 0
-    config = load_interests(Path.cwd())
-    active_counts = _active_source_counts(Path.cwd())
+    workdir = Path.cwd()
+    config = load_interests(workdir)
+    runtime = load_runtime(Path.cwd())
+    min_publishable_sources = runtime.queue_manage.min_publishable_sources_per_slot
+    active_counts = _active_source_counts(workdir)
     by_slot: dict[tuple[str, str], list[SourceInventoryStatus]] = {}
     for source_status in status.per_source.values():
         by_slot.setdefault(
@@ -336,11 +366,11 @@ def _live_source_discover(_argv: list[str] | None = None) -> int:
             if queued_total == 0:
                 slot_index += 1
                 continue
-            stocked_count = sum(1 for source in sources if source.queued_count > 0)
-            if stocked_count < _MIN_LIVE_SOURCES_PER_SLOT:
+            publishable_source_count = sum(1 for source in sources if source.pushable_count > 0)
+            if publishable_source_count < min_publishable_sources:
                 live_count = sum(1 for source in sources if _source_is_live(source))
                 candidates.append((
-                    stocked_count,
+                    publishable_source_count,
                     live_count,
                     -queued_total,
                     _topic_demand_priority(status, entry.topic),
@@ -360,56 +390,117 @@ def _live_source_discover(_argv: list[str] | None = None) -> int:
         state["live_source_discover_last_at"] = by_slot_state
 
     candidates.sort()
-    target: tuple[str, str] | None = None
-    for stocked_count, live_count, _neg_queued_total, _, _, topic, platform in candidates:
+    quotas = {
+        platform: max(0, int(limit))
+        for platform, limit in runtime.queue_manage.live_source_discover_per_cycle_by_platform.items()
+    }
+    used_by_platform: dict[str, int] = {}
+    targets: list[tuple[str, str, int, int]] = []
+    blocked_by_backoff: list[str] = []
+    blocked_by_quota: list[str] = []
+    for publishable_source_count, live_count, _neg_queued_total, _, _, topic, platform in candidates:
         key = _slot_key(topic, platform)
+        quota = quotas.get(platform, 1)
+        if used_by_platform.get(platform, 0) >= quota:
+            blocked_by_quota.append(key)
+            continue
         elapsed = _seconds_since(by_slot_state.get(key))
         if elapsed is None or elapsed >= _LIVE_SOURCE_DISCOVER_BACKOFF_SECONDS:
-            target = (topic, platform)
-            logger.info(
-                "live_source_discover: %s has stocked_sources=%d live_sources=%d (<%d stocked); invoking discover --topic --platform",
-                key,
-                stocked_count,
-                live_count,
-                _MIN_LIVE_SOURCES_PER_SLOT,
-            )
-            break
-    if target is None:
+            targets.append((topic, platform, publishable_source_count, live_count))
+            used_by_platform[platform] = used_by_platform.get(platform, 0) + 1
+        else:
+            blocked_by_backoff.append(key)
+    if not targets:
         logger.info(
-            "live_source_discover: all low-live-source slots are in backoff: %s",
-            [_slot_key(topic, platform) for _, _, _, _, _, topic, platform in candidates],
+            "live_source_discover: no low-live-source slot selected "
+            "(backoff=%s quota=%s)",
+            blocked_by_backoff or "—",
+            blocked_by_quota or "—",
         )
         return 0
 
-    topic, platform = target
-    try:
-        rc = discover_mod.main(["--topic", topic, "--platform", platform])
-    except SystemExit as exc:
-        rc = _system_exit_rc(exc, task=f"discover --topic {topic!r} --platform {platform}")
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "live_source_discover: discover --topic %r --platform %s crashed",
-            topic,
-            platform,
+    opencli_block = backpressure.active_block(backpressure.OPENCLI)
+    if opencli_block is not None:
+        logger.info(
+            "live_source_discover: skipped; opencli backpressure active (%s): %s",
+            opencli_block.get("reason"),
+            opencli_block.get("detail"),
         )
         return 0
-    by_slot_state[_slot_key(topic, platform)] = (
-        datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    )
-    atomic_write_json(_ESCALATION_PATH, state)
-    logger.info(
-        "live_source_discover: discover --topic %r --platform %s → rc=%d",
-        topic,
-        platform,
-        rc,
-    )
+
+    any_work = False
+    keywords_path = workdir / "state" / "search_terms.json"
+    existing_keywords = _load_json(keywords_path)
+    for topic, platform, publishable_source_count, live_count in targets:
+        key = _slot_key(topic, platform)
+        logger.info(
+            "live_source_discover: %s has publishable_sources=%d live_sources=%d (<%d publishable); invoking discover --topic --platform",
+            key,
+            publishable_source_count,
+            live_count,
+            min_publishable_sources,
+        )
+        if not _search_terms_for_slot(existing_keywords, topic, platform):
+            existing_keywords, keyword_count = _ensure_keywords_for_slot(
+                config=config,
+                existing=existing_keywords,
+                keywords_path=keywords_path,
+                topic=topic,
+                platform=platform,
+            )
+            if keyword_count == 0:
+                logger.warning(
+                    "live_source_discover: %s still has no keywords after seeding; skip",
+                    key,
+                )
+                continue
+        try:
+            rc = discover_mod.main(["--topic", topic, "--platform", platform])
+        except SystemExit as exc:
+            rc = _system_exit_rc(exc, task=f"discover --topic {topic!r} --platform {platform}")
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "live_source_discover: discover --topic %r --platform %s crashed",
+                topic,
+                platform,
+            )
+            continue
+        opencli_block = backpressure.active_block(backpressure.OPENCLI)
+        if opencli_block is not None:
+            logger.info(
+                "live_source_discover: discover stopped by opencli backpressure "
+                "(%s): %s",
+                opencli_block.get("reason"),
+                opencli_block.get("detail"),
+            )
+            break
+        by_slot_state[key] = (
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        )
+        any_work = True
+        logger.info(
+            "live_source_discover: discover --topic %r --platform %s → rc=%d",
+            topic,
+            platform,
+            rc,
+        )
+    if any_work:
+        atomic_write_json(_ESCALATION_PATH, state)
+        _DISCOVER_DID_WORK = True
+        if blocked_by_backoff or blocked_by_quota:
+            logger.info(
+                "live_source_discover: deferred low-live-source slots "
+                "(backoff=%s quota=%s)",
+                blocked_by_backoff or "—",
+                blocked_by_quota or "—",
+            )
     return 0
 
 
 _TASKS: list[tuple[str, Callable[[list[str] | None], int]]] = [
     ("topic_reconcile", topic_reconcile_mod.main),
-    ("bootstrap_missing", _bootstrap_missing),
     ("live_source_discover", _live_source_discover),
+    ("bootstrap_missing", _bootstrap_missing),
     ("starvation_discover", _starvation_discover),
     ("patrol", patrol_mod.main),
     ("filter", filter_mod.main),
@@ -448,6 +539,8 @@ def _system_exit_rc(exc: SystemExit, *, task: str) -> int:
 def _run_once() -> int:
     """One full supply_cycle pass. Returns 0 on full success; non-zero if
     any task fails (current cycle aborts, next tick retries)."""
+    global _DISCOVER_DID_WORK
+    _DISCOVER_DID_WORK = False
     for name, fn in _TASKS:
         logger.info("─── %s ───", name)
         try:

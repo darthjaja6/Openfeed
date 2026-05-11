@@ -13,8 +13,9 @@ Current MVP shape:
   - Every active source is patrolled every run (no per-source cadence tiers
     yet — runtime config has the hook, we'll layer cadence on later)
   - Dedup = filename-based; content_id baked into filename
-  - Failures emit a `patrol_failed` event to `ledgers/decisions.jsonl`;
-    no watchlist escalation yet (PRD §5.2 defers that to learn + retire)
+  - Source-level failures emit a `patrol_failed` event to
+    `ledgers/decisions.jsonl`; transient OpenCLI/browser failures are logged
+    but not attributed to the source.
   - `source.last_patrolled_at` is updated whether or not new items surfaced
 
 File naming: `{YYYYMMDDTHHMMSS}_{platform}_{content_id_sanitised}.json`
@@ -40,7 +41,11 @@ from tqdm import tqdm
 
 from openfeed.clients.content import opencli
 from openfeed.clients.content import tiktok as tiktok_client
-from openfeed.clients.content.opencli import OpenCLIError, OpenCLIInfraError
+from openfeed.clients.content.opencli import (
+    OpenCLIError,
+    OpenCLIInfraError,
+    OpenCLITransientError,
+)
 from openfeed.core.judgment_ledger import attach_file as _attach_ledger, emit_judgment
 from openfeed.models.content_item import (
     ContentItem,
@@ -646,12 +651,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             max_age_map[key] = temporal.max_age_days
 
-    # opencli calls (youtube + x) share a Chrome semaphore globally, so
-    # parallelism above 1 is capped there anyway; web uses feedparser over
-    # plain HTTP which parallelises freely. Run them through a shared pool
-    # for uniform progress reporting.
+    # OpenCLI-backed platforms enter the local OpenCLI service, which enforces
+    # per-site lane limits. Web uses feedparser over plain HTTP. Run both
+    # through this shared pool for uniform progress reporting.
     n_new = 0
     n_fail = 0
+    n_transient_fail = 0
     n_infra_fail = 0
     # If the Chrome bridge dies mid-run, every remaining source will fail the
     # same way — break early after 3 consecutive infra errors.
@@ -693,12 +698,24 @@ def main(argv: list[str] | None = None) -> int:
                         f.cancel()
                     break
                 continue
+            except OpenCLITransientError as exc:
+                n_transient_fail += 1
+                logger.warning(
+                    "transient opencli failure on %s; not marking source exhausted: %s",
+                    source.catalog_key,
+                    exc,
+                )
+                continue
             except (OpenCLIError, Exception) as exc:  # noqa: BLE001
                 emit_judgment(
                     event_type="reject_source", platform=source.platform, topic=source.topic,
                     source_id=source.source_id, source_name=source.name,
                     reason_code="patrol_failed",
-                    evidence={"error": f"{type(exc).__name__}: {str(exc)[:200]}"},
+                    evidence=(
+                        exc.evidence()
+                        if isinstance(exc, OpenCLIError)
+                        else {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+                    ),
                 )
                 row = catalog.sources.get(source.catalog_key)
                 if row is not None:
@@ -740,20 +757,21 @@ def main(argv: list[str] | None = None) -> int:
     if aborted:
         logger.warning(
             "patrol aborted after %d infra failures; %d items written from %d sources "
-            "processed before abort (%d per-source failures)",
+            "processed before abort (%d per-source failures, %d transient opencli failures)",
             n_infra_fail, n_new,
-            sum(1 for f in futures if f.done() and not f.cancelled()), n_fail,
+            sum(1 for f in futures if f.done() and not f.cancelled()), n_fail, n_transient_fail,
         )
         return 2
     logger.info(
-        "patrol_ok: %d new queue items, %d source failures, catalog patrolled_at updated",
-        n_new, n_fail,
+        "patrol_ok: %d new queue items, %d source failures, %d transient opencli failures, catalog patrolled_at updated",
+        n_new, n_fail, n_transient_fail,
     )
     cycle_summary.add(
         "patrol",
         sources_covered=len(active),
         new_items=n_new,
         source_failures=n_fail,
+        transient_opencli_failures=n_transient_fail,
     )
     return 0
 

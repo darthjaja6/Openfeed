@@ -32,7 +32,7 @@ from tqdm import tqdm
 
 from openfeed.clients.content import opencli
 from openfeed.clients.llm import GeminiRunner
-from openfeed.clients.content.opencli import OpenCLIError
+from openfeed.clients.content.opencli import OpenCLIError, OpenCLITransientError
 from openfeed.utils.video_frames import (
     extract_youtube_frames as extract_youtube_frames_for_url,
     parse_duration_seconds,
@@ -60,6 +60,11 @@ logger = logging.getLogger("youtube_source_review")
 _YT_VIDEO_ID_PAT = re.compile(r"(?:v=|youtu\.be/|shorts/)([A-Za-z0-9_-]{11})")
 _YT_DISCOVERY_VIDEOS_PER_CHANNEL = 3
 _TOP_VIDEOS_PER_CANDIDATE = 3
+
+
+@dataclass(frozen=True)
+class _TransientOpenCLIResult:
+    error: OpenCLITransientError
 
 
 @dataclass(frozen=True)
@@ -109,7 +114,7 @@ def discover_youtube_candidates(
                  channel name (a single channel often contributes multiple
                  videos to the top-N; don't resolve it more than once).
       Stage 2A — for each unique name, call `opencli youtube_video(bait_url)`
-                 (~5-10s serial under opencli's Chrome semaphore). This is
+                 through the local OpenCLI service. This is
                  where channel_id + subscribers first become available, so:
                    - catalog_channel_ids dedup (precise, no name-collision risk)
                    - subs hard gate (`min_subscribers`)
@@ -153,6 +158,14 @@ def discover_youtube_candidates(
             except Exception as exc:  # noqa: BLE001
                 logger.debug("yt_resolve crashed for %s/%s: %s", topic, name, exc)
                 result = None
+            if isinstance(result, _TransientOpenCLIResult):
+                logger.warning(
+                    "yt_resolve transient opencli failure for %s/%s; skip without rejecting source: %s",
+                    topic,
+                    name,
+                    result.error,
+                )
+                continue
             if result is None:
                 emit_judgment(
                     event_type="reject_source", platform="youtube", topic=topic,
@@ -210,6 +223,14 @@ def discover_youtube_candidates(
             except Exception as exc:  # noqa: BLE001
                 logger.debug("yt_detail crashed for %s/%s: %s", r["topic"], r["name"], exc)
                 cand = None
+            if isinstance(cand, _TransientOpenCLIResult):
+                logger.warning(
+                    "yt_detail transient opencli failure for %s/%s; skip without rejecting source: %s",
+                    r["topic"],
+                    r["name"],
+                    cand.error,
+                )
+                continue
             if cand is None:
                 emit_judgment(
                     event_type="reject_source", platform="youtube", topic=r["topic"],
@@ -262,6 +283,9 @@ def _discover_stage1(
             # whether they post long-form or Shorts; per-channel Shorts pull
             # happens at patrol time (see core/patrol.py).
             results = opencli.youtube_search(keyword, limit=pull_limit)
+        except OpenCLITransientError as exc:
+            logger.warning("youtube search %r transient opencli failure; skip keyword: %s", keyword, exc)
+            continue
         except OpenCLIError as exc:
             logger.warning("youtube search %r failed: %s", keyword, exc)
             continue
@@ -288,6 +312,9 @@ def _resolve_channel(bait_url: str) -> tuple[str, dict[str, Any]] | None:
     we reuse in stage 2B as fallbacks."""
     try:
         video_meta = opencli.youtube_video(bait_url)
+    except OpenCLITransientError as exc:
+        logger.warning("youtube_video transient opencli failure for %s: %s", bait_url, exc)
+        return _TransientOpenCLIResult(error=exc)
     except OpenCLIError as exc:
         logger.debug("youtube_video failed for %s: %s", bait_url, exc)
         return None
@@ -304,6 +331,9 @@ def _fetch_channel_detail(resolved: dict[str, Any]) -> YouTubeCandidate | None:
     channel_id = resolved["channel_id"]
     try:
         ch = opencli.youtube_channel(channel_id, limit=_YT_DISCOVERY_VIDEOS_PER_CHANNEL)
+    except OpenCLITransientError as exc:
+        logger.warning("youtube_channel transient opencli failure for %s: %s", channel_id, exc)
+        return _TransientOpenCLIResult(error=exc)
     except OpenCLIError as exc:
         logger.debug("youtube_channel failed for %s: %s", channel_id, exc)
         return None

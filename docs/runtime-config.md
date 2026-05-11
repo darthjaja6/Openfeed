@@ -58,6 +58,8 @@ affected process.
 | field | default | meaning |
 |---|---|---|
 | `source_floor` | 10 | Per-active-source metadata floor; sources below this are refilled |
+| `min_publishable_sources_per_slot` | 8 | Minimum distinct sources with at least one publishable queue item per `(topic, platform)` |
+| `live_source_discover_per_cycle_by_platform` | `{youtube: 1, tiktok: 3, web: 3, x: 1}` | Static per-platform cap for low-publishable scoped discover runs per supply cycle |
 | `source_exhausted_retry_seconds` | 21600 | Temporary skip window after patrol finds no new items for a source |
 
 ## `push`

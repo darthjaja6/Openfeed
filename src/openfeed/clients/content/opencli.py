@@ -1,14 +1,8 @@
-"""Thin subprocess wrapper around the `opencli` CLI.
+"""Client wrapper for OpenCLI-backed content adapters.
 
-opencli drives a user-logged-in Chrome session via a browser extension; calling
-it from here gives us real-login-state fetches that bypass most bot detection
-and paywalls, plus purpose-built adapters for Twitter/X, YouTube, Reddit,
-Hacker News, Substack, Bilibili, etc.
-
-opencli backs all calls onto a single Chrome instance, so concurrent requests
-to the same platform race on tab reuse + risk anti-bot detection. We serialize
-per platform via `_platform_lock` (threading.Lock for in-process + fcntl.flock
-for cross-process). Different platforms run in parallel with their own locks.
+OpenFeed does not invoke the `opencli` binary directly. Browser-backed work is
+submitted to the local OpenCLI service, which owns the job queue, per-site
+worker pools, and tab/lane resource coordination for this machine.
 
 Three output shapes:
 
@@ -22,66 +16,49 @@ Three output shapes:
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
-import subprocess
-import threading
 import time
-from contextlib import contextmanager
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
+
+from openfeed.opencli_service import client as opencli_service
 
 logger = logging.getLogger("opencli")
 
-# Per-platform locks coordinate access to opencli's single Chrome instance.
-# In-process: threading.Lock per platform → at most one of this process's
-# worker threads runs an opencli call for that platform at a time.
-# Cross-process: fcntl.flock on a per-platform lock file → at most one PROCESS
-# holds the lock for that platform. Both layers are needed: threading.Lock
-# alone doesn't span processes; fcntl.flock alone is per-fd on Linux so
-# different threads of one process could each open the file and double up.
-_PLATFORM_THREAD_LOCKS: dict[str, threading.Lock] = {}
-_THREAD_LOCKS_GUARD = threading.Lock()
-_LOCK_DIR = Path(os.environ.get("TMPDIR") or "/tmp")
 
+@dataclass(frozen=True)
+class OpenCLIFailure:
+    kind: str
+    job_id: str | None = None
+    site: str | None = None
+    command: str | None = None
+    returncode: int | None = None
+    status: str | None = None
 
-def _get_thread_lock(platform: str) -> threading.Lock:
-    with _THREAD_LOCKS_GUARD:
-        lock = _PLATFORM_THREAD_LOCKS.get(platform)
-        if lock is None:
-            lock = threading.Lock()
-            _PLATFORM_THREAD_LOCKS[platform] = lock
-    return lock
-
-
-@contextmanager
-def _platform_lock(platform: str):
-    """Hold both the in-process thread lock AND the cross-process file lock
-    for `platform`. Different platforms hold independent locks → run in
-    parallel. Same-platform callers (any thread, any process) serialize."""
-    thread_lock = _get_thread_lock(platform)
-    lock_path = _LOCK_DIR / f"openfeed-opencli-{platform}.lock"
-    with thread_lock:
-        # Open afresh per acquire so closing the fd in the finally clause is
-        # the unambiguous release path.
-        fd = open(lock_path, "w")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            finally:
-                fd.close()
+    def as_evidence(self) -> dict[str, Any]:
+        return {
+            "failure_kind": self.kind,
+            "job_id": self.job_id,
+            "site": self.site,
+            "command": self.command,
+            "returncode": self.returncode,
+            "status": self.status,
+        }
 
 
 class OpenCLIError(RuntimeError):
     """Any opencli failure — per-source errors (handle doesn't exist, 404, etc)
     and infrastructure errors (browser bridge down, daemon crashed) share this
     base. Callers that want to distinguish check for `OpenCLIInfraError`."""
-    pass
+
+    def __init__(self, message: str, *, failure: OpenCLIFailure | None = None) -> None:
+        super().__init__(message)
+        self.failure = failure or OpenCLIFailure(kind="permanent")
+
+    def evidence(self) -> dict[str, Any]:
+        return {"error": str(self)[:500], **self.failure.as_evidence()}
 
 
 class OpenCLIInfraError(OpenCLIError):
@@ -89,6 +66,16 @@ class OpenCLIInfraError(OpenCLIError):
     (Browser Bridge extension not connected, Chrome not running, daemon
     unavailable, etc). Caller should abort-and-retry-later rather than skip
     and move on, because every subsequent call will fail the same way."""
+    pass
+
+
+class OpenCLITransientError(OpenCLIError):
+    """Transient OpenCLI/browser/adapter failure for one job.
+
+    These failures should not be attributed to the source or candidate being
+    fetched. Typical examples are stale tab leases and malformed adapter output
+    under browser concurrency.
+    """
     pass
 
 
@@ -102,6 +89,16 @@ _INFRA_CODE_MARKERS = (
     "Browser Bridge extension not connected",
     "Make sure Chrome",
 )
+_TRANSIENT_CODE_MARKERS = (
+    "No tab with given id",
+    "stale page",
+    "stale page identity",
+    "Target page, context or browser has been closed",
+    "Unexpected end of JSON input",
+    "opencli returned non-JSON stdout",
+    "Execution context was destroyed",
+    "Navigation failed because page was closed",
+)
 
 
 def _is_infra_failure(returncode: int, payload: str) -> bool:
@@ -110,13 +107,32 @@ def _is_infra_failure(returncode: int, payload: str) -> bool:
     return any(marker in payload for marker in _INFRA_CODE_MARKERS)
 
 
-def run(args: list[str], *, timeout: int = 120, retries: int = 1) -> Any:
-    """Run `opencli <args...> --format json`, return parsed JSON stdout.
+def _is_transient_failure(payload: str) -> bool:
+    return any(marker in payload for marker in _TRANSIENT_CODE_MARKERS)
 
-    Concurrency-capped via a module-level semaphore; retries once after a short
-    backoff on transient per-source errors. Infra failures short-circuit
-    (no retry — if Chrome is down, retrying in 2s won't help).
-    """
+
+def _failure(
+    *,
+    kind: str,
+    job_id: str | None,
+    site: str | None,
+    command: str | None,
+    returncode: Any,
+    status: str | None,
+) -> OpenCLIFailure:
+    code = returncode if isinstance(returncode, int) else None
+    return OpenCLIFailure(
+        kind=kind,
+        job_id=job_id,
+        site=site,
+        command=command,
+        returncode=code,
+        status=status,
+    )
+
+
+def run(args: list[str], *, timeout: int = 120, retries: int = 1) -> Any:
+    """Run an OpenCLI adapter through the local OpenCLI service."""
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
         try:
@@ -126,68 +142,184 @@ def run(args: list[str], *, timeout: int = 120, retries: int = 1) -> Any:
         except OpenCLIError as exc:
             last_exc = exc
             if attempt < retries:
-                logger.debug("opencli retry after %s: %s", 2 * (attempt + 1), exc)
+                logger.warning(
+                    "opencli retry kind=%s job_id=%s after %ss: %s",
+                    exc.failure.kind,
+                    exc.failure.job_id,
+                    2 * (attempt + 1),
+                    exc,
+                )
                 time.sleep(2 * (attempt + 1))
     raise last_exc  # type: ignore[misc]
 
 
 def _run_once(args: list[str], *, timeout: int) -> Any:
-    """Run one opencli call under the per-platform lock. The lock spans both
-    threads (in-process) and processes (cross-process via flock), so all
-    callers serialize per-platform. Different platforms run independently."""
-    full_args = ["opencli", *args, "--format", "json"]
-    platform = args[0] if args else "_default"
-    with _platform_lock(platform):
-        try:
-            result = subprocess.run(
-                full_args, capture_output=True, text=True, timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise OpenCLIError(
-                f"opencli {' '.join(args)} timed out after {timeout}s"
-            ) from exc
-    stdout = (result.stdout or "").strip()
-    stderr = (result.stderr or "").strip()
-    if result.returncode != 0:
-        payload = stderr[:300] or stdout[:300]
-        msg = f"opencli {' '.join(args)} exit={result.returncode}: {payload}"
-        if _is_infra_failure(result.returncode, stderr + stdout):
-            raise OpenCLIInfraError(msg)
-        raise OpenCLIError(msg)
-    if not stdout:
-        raise OpenCLIError(f"opencli {' '.join(args)} returned empty stdout")
+    if len(args) < 2:
+        raise OpenCLIError("opencli args must include site and command")
+    site, command, *command_args = args
     try:
-        parsed = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise OpenCLIError(f"opencli {' '.join(args)} non-JSON: {stdout[:300]!r}") from exc
+        response = opencli_service.submit_job(
+            project="openfeed",
+            site=site,
+            command=command,
+            args=command_args,
+            timeout_seconds=timeout,
+        )
+        job = response.get("job") or {}
+        job_id = str(job.get("id") or "")
+        if not job_id:
+            raise OpenCLIError(
+                f"opencli service did not return a job id: {response}",
+                failure=_failure(
+                    kind="infra",
+                    job_id=None,
+                    site=site,
+                    command=command,
+                    returncode=None,
+                    status=None,
+                ),
+            )
+        result = opencli_service.wait_for_job(job_id)
+    except opencli_service.OpenCLIServiceError as exc:
+        raise OpenCLIInfraError(
+            str(exc),
+            failure=_failure(
+                kind="infra",
+                job_id=None,
+                site=site,
+                command=command,
+                returncode=None,
+                status=None,
+            ),
+        ) from exc
+
+    job_id = str(result.get("id") or job_id)
+    status = str(result.get("status") or "")
+    result_site = str(result.get("site") or site)
+    result_command = str(result.get("command") or command)
+    stdout = str(result.get("stdout") or "").strip()
+    stderr = str(result.get("stderr") or "").strip()
+    returncode = result.get("returncode")
+    if status != "succeeded":
+        payload = str(result.get("error") or stderr[:300] or stdout[:300])
+        msg = (
+            f"opencli {' '.join(args)} job_id={job_id} status={status} "
+            f"returncode={returncode}: {payload}"
+        )
+        code = int(returncode) if isinstance(returncode, int) else 1
+        combined = stderr + stdout + payload
+        if _is_infra_failure(code, combined):
+            raise OpenCLIInfraError(
+                msg,
+                failure=_failure(
+                    kind="infra",
+                    job_id=job_id,
+                    site=result_site,
+                    command=result_command,
+                    returncode=returncode,
+                    status=status,
+                ),
+            )
+        if _is_transient_failure(combined):
+            raise OpenCLITransientError(
+                msg,
+                failure=_failure(
+                    kind="transient",
+                    job_id=job_id,
+                    site=result_site,
+                    command=result_command,
+                    returncode=returncode,
+                    status=status,
+                ),
+            )
+        raise OpenCLIError(
+            msg,
+            failure=_failure(
+                kind="permanent",
+                job_id=job_id,
+                site=result_site,
+                command=result_command,
+                returncode=returncode,
+                status=status,
+            ),
+        )
+    parsed = result.get("result")
+    if parsed is None:
+        if not stdout:
+            raise OpenCLITransientError(
+                f"opencli {' '.join(args)} job_id={job_id} returned empty stdout",
+                failure=_failure(
+                    kind="transient",
+                    job_id=job_id,
+                    site=result_site,
+                    command=result_command,
+                    returncode=returncode,
+                    status=status,
+                ),
+            )
+        try:
+            parsed = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise OpenCLITransientError(
+                f"opencli {' '.join(args)} job_id={job_id} non-JSON: {stdout[:300]!r}",
+                failure=_failure(
+                    kind="transient",
+                    job_id=job_id,
+                    site=result_site,
+                    command=result_command,
+                    returncode=returncode,
+                    status=status,
+                ),
+            ) from exc
     if isinstance(parsed, dict) and parsed.get("ok") is False:
         err = parsed.get("error") or {}
         err_code = str(err.get("code", ""))
         err_msg = str(err.get("message") or err)
-        msg = f"opencli {' '.join(args)} error: {err_msg}"
+        msg = f"opencli {' '.join(args)} job_id={job_id} error: {err_msg}"
         if err_code.startswith("BROWSER_") or err_code.startswith("BRIDGE_"):
-            raise OpenCLIInfraError(msg)
-        raise OpenCLIError(msg)
+            raise OpenCLIInfraError(
+                msg,
+                failure=_failure(
+                    kind="infra",
+                    job_id=job_id,
+                    site=result_site,
+                    command=result_command,
+                    returncode=returncode,
+                    status=status,
+                ),
+            )
+        if _is_transient_failure(err_msg):
+            raise OpenCLITransientError(
+                msg,
+                failure=_failure(
+                    kind="transient",
+                    job_id=job_id,
+                    site=result_site,
+                    command=result_command,
+                    returncode=returncode,
+                    status=status,
+                ),
+            )
+        raise OpenCLIError(
+            msg,
+            failure=_failure(
+                kind="permanent",
+                job_id=job_id,
+                site=result_site,
+                command=result_command,
+                returncode=returncode,
+                status=status,
+            ),
+        )
     return parsed
 
 
 def ping() -> None:
-    """Preflight health check — raises `OpenCLIInfraError` if the browser
-    bridge / daemon isn't reachable. Cheap: just asks for opencli's version."""
+    """Preflight health check against the local OpenCLI service."""
     try:
-        subprocess.run(
-            ["opencli", "--version"],
-            capture_output=True, text=True, timeout=10,
-            check=True,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise OpenCLIInfraError("opencli --version timed out — daemon hung?") from exc
-    except subprocess.CalledProcessError as exc:
-        raise OpenCLIInfraError(
-            f"opencli --version exit={exc.returncode}: {(exc.stderr or exc.stdout or '')[:200]}"
-        ) from exc
-    except FileNotFoundError as exc:
-        raise OpenCLIInfraError("opencli binary not found in PATH") from exc
+        opencli_service.health()
+    except opencli_service.OpenCLIServiceError as exc:
+        raise OpenCLIInfraError(str(exc)) from exc
     # Now test the actual Chrome bridge with a trivial query. In remote desktop
     # VPS sessions X/Twitter can take >20s to wake a cold tab, so keep this
     # timeout configurable and conservative.

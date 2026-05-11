@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from openfeed.opencli_service import client as opencli_service
+
 
 @dataclass(frozen=True)
 class Instance:
@@ -32,6 +34,7 @@ CORE_COMMANDS: dict[str, str] = {
     "filter": "openfeed.core.filter",
     "learn": "openfeed.core.learn",
     "local-server": "openfeed.clients.consumer.local_web",
+    "opencli-service": "openfeed.opencli_service.server",
     "patrol": "openfeed.core.patrol",
     "prepare": "openfeed.core.prepare_video",
     "push": "openfeed.core.push",
@@ -188,6 +191,35 @@ def _run_command_help(command: str, args: Sequence[str]) -> int:
     return 2
 
 
+def _run_opencli_service_command(options: dict[str, str], args: Sequence[str]) -> int:
+    if "config" in options:
+        print(
+            "opencli-service uses its own config; pass it after the command: "
+            "openfeed opencli-service --config PATH",
+            file=sys.stderr,
+        )
+        return 2
+    root = Path(options.get("instance") or ".").expanduser().resolve()
+    workdir = Path(options.get("workdir") or (root / "output")).expanduser().resolve()
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env["OPENFEED_WORKDIR"] = str(workdir)
+    env.pop("OPENFEED_CONFIG_FILE", None)
+
+    module_args = list(args)
+    has_workdir_arg = any(arg == "--workdir" or arg.startswith("--workdir=") for arg in module_args)
+    if not has_workdir_arg:
+        module_args = ["--workdir", str(workdir), *module_args]
+
+    return subprocess.run(
+        _module_command("openfeed.opencli_service.server", module_args),
+        cwd=workdir,
+        env=env,
+        check=False,
+    ).returncode
+
+
 def _parse_start_args(args: Sequence[str]) -> dict[str, object]:
     values: dict[str, object] = {
         "local_server": False,
@@ -283,6 +315,17 @@ def _tail(path: Path, lines: int = 40) -> str:
     return "\n".join(data[-lines:])
 
 
+def _wait_opencli_service(timeout_seconds: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            opencli_service.health()
+            return True
+        except opencli_service.OpenCLIServiceError:
+            time.sleep(0.25)
+    return False
+
+
 def _run_prepare_loop(instance: Instance, args: Sequence[str]) -> int:
     interval = float(args[0]) if args else float(os.environ.get("OPENFEED_PREPARE_INTERVAL", "10"))
     while True:
@@ -296,6 +339,28 @@ def _run_start(instance: Instance, args: Sequence[str]) -> int:
         _start_usage()
         return 0
 
+    processes: list[ManagedProcess] = []
+    stop_requested = False
+
+    processes.append(
+        _start_process(
+            instance,
+            "opencli-service",
+            _module_command(
+                "openfeed.opencli_service.server",
+                ["--workdir", str(instance.workdir)],
+            ),
+        )
+    )
+    if not _wait_opencli_service():
+        tail = _tail(processes[0].log_path)
+        print(
+            f"opencli service did not become healthy; last log lines from {processes[0].log_path}:\n{tail}",
+            file=sys.stderr,
+        )
+        _stop_processes(processes)
+        return 1
+
     print("Running openfeed doctor...")
     doctor_rc = _run_subprocess(
         "openfeed.doctor",
@@ -304,10 +369,8 @@ def _run_start(instance: Instance, args: Sequence[str]) -> int:
         explicit_paths=True,
     )
     if doctor_rc != 0:
+        _stop_processes(processes)
         return doctor_rc
-
-    processes: list[ManagedProcess] = []
-    stop_requested = False
 
     def request_stop(_signum: int, _frame: object) -> None:
         nonlocal stop_requested
@@ -419,6 +482,9 @@ def main(argv: list[str] | None = None) -> int:
     if command == "start" and args in (["-h"], ["--help"]):
         _start_usage()
         return 0
+
+    if command == "opencli-service":
+        return _run_opencli_service_command(options, args)
 
     try:
         instance = _resolve_instance(options)

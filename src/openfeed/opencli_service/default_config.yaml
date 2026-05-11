@@ -1,0 +1,19 @@
+host: 127.0.0.1
+port: 19826
+default_profile: default
+default_lanes: 1
+default_timeout_seconds: 180
+poll_seconds: 0.25
+pools:
+  twitter:
+    lanes: 4
+    timeout_seconds: 180
+  tiktok:
+    lanes: 4
+    timeout_seconds: 180
+  youtube:
+    lanes: 4
+    timeout_seconds: 180
+  google:
+    lanes: 5
+    timeout_seconds: 120

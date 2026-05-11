@@ -34,7 +34,11 @@ from tqdm import tqdm
 
 from openfeed.clients.content import feed, opencli, tiktok as tiktok_client
 from openfeed.clients.llm import GeminiRunner
-from openfeed.clients.content.opencli import OpenCLIError, OpenCLIInfraError
+from openfeed.clients.content.opencli import (
+    OpenCLIError,
+    OpenCLIInfraError,
+    OpenCLITransientError,
+)
 from openfeed.core.judgment_ledger import attach_file as _attach_ledger, emit_judgment
 from openfeed.core.youtube_source_review import (
     YouTubeDiscoverParams,
@@ -348,6 +352,14 @@ def _discover_x_for_topic(
             posts = opencli.twitter_search(kw, limit=rt.results_per_keyword)
         except OpenCLIInfraError:
             raise
+        except OpenCLITransientError as exc:
+            logger.warning(
+                "x_discover[%s]: transient twitter_search %r failed; skip this keyword: %s",
+                topic,
+                kw,
+                exc,
+            )
+            continue
         except OpenCLIError as exc:
             logger.warning("x_discover[%s]: twitter_search %r failed: %s", topic, kw, exc)
             continue
@@ -364,20 +376,28 @@ def _discover_x_for_topic(
     if not by_author:
         return []
 
-    # Stage 2: enrich each author (opencli calls; global serialisation)
+    # Stage 2: enrich each author through the local OpenCLI service.
     enriched: list[dict[str, Any]] = []
     for handle, meta in tqdm(by_author.items(), desc=f"x_enrich[{topic}]", unit="acct"):
         try:
             profile = opencli.twitter_profile(handle)
         except OpenCLIInfraError:
             raise
+        except OpenCLITransientError as exc:
+            logger.warning(
+                "x_discover[%s]: transient profile lookup failed for %s; skip this candidate: %s",
+                topic,
+                handle,
+                exc,
+            )
+            continue
         except OpenCLIError as exc:
             emit_judgment(
                 event_type="reject_source", platform="x", topic=topic,
                 source_id=handle, source_name=handle,
                 reason_code="profile_lookup_failed",
                 matched_keywords=meta["matched_keywords"],
-                evidence={"error": str(exc)[:200]},
+                evidence=exc.evidence(),
             )
             continue
         screen_name = str(profile.get("screen_name") or "").strip()
@@ -406,6 +426,14 @@ def _discover_x_for_topic(
             tweets = opencli.twitter_user_timeline(handle, limit=_X_ENRICH_POSTS)
         except OpenCLIInfraError:
             raise
+        except OpenCLITransientError as exc:
+            logger.warning(
+                "x_discover[%s]: transient timeline failed for %s; continuing without tweets: %s",
+                topic,
+                handle,
+                exc,
+            )
+            tweets = []
         except OpenCLIError as exc:
             logger.warning("x_discover[%s]: timeline failed for %s: %s", topic, handle, exc)
             tweets = []
@@ -593,6 +621,14 @@ def _discover_tiktok_for_topic(
             rows = opencli.tiktok_search(kw, limit=rt.results_per_keyword)
         except OpenCLIInfraError:
             raise
+        except OpenCLITransientError as exc:
+            logger.warning(
+                "tiktok_discover[%s]: transient tiktok_search %r failed; skip this keyword: %s",
+                topic,
+                kw,
+                exc,
+            )
+            continue
         except OpenCLIError as exc:
             logger.warning("tiktok_discover[%s]: tiktok_search %r failed: %s", topic, kw, exc)
             continue
@@ -624,13 +660,21 @@ def _discover_tiktok_for_topic(
             profile = opencli.tiktok_profile(handle)
         except OpenCLIInfraError:
             raise
+        except OpenCLITransientError as exc:
+            logger.warning(
+                "tiktok_discover[%s]: transient profile lookup failed for %s; skip this candidate: %s",
+                topic,
+                handle,
+                exc,
+            )
+            continue
         except OpenCLIError as exc:
             emit_judgment(
                 event_type="reject_source", platform="tiktok", topic=topic,
                 source_id=handle, source_name=handle,
                 reason_code="profile_lookup_failed",
                 matched_keywords=meta["matched_keywords"],
-                evidence={"error": str(exc)[:200]},
+                evidence=exc.evidence(),
             )
             continue
         username = str(profile.get("username") or handle).strip().lstrip("@")
@@ -932,6 +976,14 @@ def _discover_web_for_topic(
             results = opencli.google_search(kw, limit=rt.results_per_keyword, lang=lang)
         except OpenCLIInfraError:
             raise
+        except OpenCLITransientError as exc:
+            logger.warning(
+                "web_discover[%s]: transient google_search %r failed; skip this keyword: %s",
+                topic,
+                kw,
+                exc,
+            )
+            continue
         except OpenCLIError as exc:
             logger.warning("web_discover[%s]: google_search %r failed: %s", topic, kw, exc)
             continue

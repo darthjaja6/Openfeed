@@ -61,9 +61,15 @@ filter:
     min_photo_count: 1
 queue_manage:
   source_floor: 10
+  min_publishable_sources_per_slot: 8
+  live_source_discover_per_cycle_by_platform:
+    youtube: 1
+    tiktok: 3
+    web: 3
+    x: 1
   source_exhausted_retry_seconds: 21600
 push:
-  target_buffer: 3
+  target_buffer: 10
   max_per_tick: 3
   producer: ticlawk
   tick_budget_seconds: 30

@@ -50,13 +50,22 @@ Install the Browser Bridge Chrome extension:
 4. Enable **Developer mode**.
 5. Click **Load unpacked** and select the unzipped extension folder.
 
-Then open Google Chrome, log in to TikTok, and run:
+Then open Google Chrome and log in to TikTok. OpenFeed talks to OpenCLI through
+its local OpenCLI service; `openfeed start` launches that service automatically.
+To check it manually, run the service in one terminal:
 
 ```bash
-opencli doctor
+openfeed opencli-service
 ```
 
-When the Browser Bridge is connected, the OpenCLI extension should show:
+Then run the doctor in another terminal:
+
+```bash
+openfeed doctor
+```
+
+When the Browser Bridge is connected and the OpenCLI service is reachable, the
+OpenCLI extension should show:
 
 ![OpenCLI Browser Bridge connected](opencli_extension.png)
 
@@ -79,9 +88,9 @@ Start the local scheduler and feed server:
 openfeed start --local-server --open
 ```
 
-`start` runs `openfeed doctor` first. If config, credentials, templates, or
-local tools are missing, it stops and tells you what to fix. After that it runs
-the supply, prepare, and refill loops, then opens the local feed at
+`start` launches the OpenCLI service and runs `openfeed doctor` first. If config,
+credentials, templates, or local tools are missing, it stops and tells you what
+to fix. After that it runs the supply, prepare, and refill loops, then opens the local feed at
 `http://127.0.0.1:8765/`. The first cards can take a while because OpenFeed
 needs to find sources, review content, and build the queue.
 
@@ -95,6 +104,7 @@ When you run `openfeed` from the instance directory, no path flags are needed:
 
 ```bash
 openfeed doctor
+openfeed opencli-service
 openfeed status
 openfeed start --local-server --open
 ```
@@ -132,6 +142,20 @@ openfeed --instance /path/to/my-openfeed refill
 openfeed --instance /path/to/my-openfeed discover
 ```
 
+`openfeed opencli-service` exposes a local HTTP API on `127.0.0.1:19826` for
+browser-backed OpenCLI jobs. Other local projects can submit browser jobs there
+instead of starting competing OpenCLI tab sessions. The service is independent
+from OpenFeed's feed/topic/card pipeline, accepts any OpenCLI-supported
+`site`/`command`, and can be started standalone:
+
+```bash
+openfeed --workdir ~/.local/state/openfeed-opencli opencli-service
+```
+
+OpenCLI service scheduling has its own config file, separate from
+`openfeed.yaml`. See [OpenCLI Service](docs/opencli-service.md) for capability
+discovery, service config, HTTP API, and job format.
+
 ## Next Steps
 
 ### Change your Preference Settings
@@ -168,6 +192,7 @@ The same consumer contract is described in
 ## Advanced
 
 - [Production operations](docs/operations.md)
+- [OpenCLI Service](docs/opencli-service.md)
 - [Internal runtime defaults](docs/runtime-config.md)
 - [Custom feed clients](docs/custom-producer.md)
 - [Architecture](docs/architecture.md)

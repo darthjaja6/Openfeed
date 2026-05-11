@@ -36,7 +36,7 @@ from openfeed.utils.config_files import config_path, load_env
 from openfeed.clients.content import opencli
 from openfeed.clients.content.browser import get_html
 from openfeed.clients.llm import GeminiRunner
-from openfeed.clients.content.opencli import OpenCLIError
+from openfeed.clients.content.opencli import OpenCLIError, OpenCLITransientError
 from openfeed.core.bootstrap_io import (
     empty_keyword_slots,
     load_seed_sources,
@@ -449,9 +449,12 @@ def _validate_x_via_opencli(topic: str, seed: SeedSource) -> ValidatedSource | N
         return None
     try:
         profile = opencli.twitter_profile(handle)
+    except OpenCLITransientError as exc:
+        logger.warning("transient twitter profile failed for %s; skip seed without rejecting: %s", handle, exc)
+        return None
     except OpenCLIError as exc:
         logger.debug("twitter profile failed for %s: %s", handle, exc)
-        _reject("profile_lookup_failed", error=str(exc)[:200])
+        _reject("profile_lookup_failed", **exc.evidence())
         return None
     screen_name = str(profile.get("screen_name") or "").strip()
     if not screen_name:
@@ -460,6 +463,9 @@ def _validate_x_via_opencli(topic: str, seed: SeedSource) -> ValidatedSource | N
 
     try:
         tweets = opencli.twitter_user_timeline(handle, limit=10)
+    except OpenCLITransientError as exc:
+        logger.warning("transient twitter timeline failed for %s; continuing without tweets: %s", handle, exc)
+        tweets = []
     except OpenCLIError as exc:
         logger.warning("twitter timeline failed for %s: %s", handle, exc)
         tweets = []

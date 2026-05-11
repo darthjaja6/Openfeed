@@ -150,11 +150,19 @@ class QueueManageConfig(BaseModel):
 
     `source_floor` — every active source should keep at least this many queued
     metadata items. Supply refills sources below this floor.
+    `min_publishable_sources_per_slot` — minimum distinct sources with at
+    least one media-ready/publishable queue item for each (topic, platform)
+    slot. Supply runs scoped discover when a slot falls below this count.
+    `live_source_discover_per_cycle_by_platform` — static per-platform quota
+    for how many low-publishable (topic, platform) slots live_source_discover
+    may run in one supply cycle.
     `source_exhausted_retry_seconds` — temporary skip window after patrol finds
     no new content for a source.
     """
     model_config = ConfigDict(extra="forbid")
     source_floor: int
+    min_publishable_sources_per_slot: int
+    live_source_discover_per_cycle_by_platform: dict[str, int]
     source_exhausted_retry_seconds: int
 
 
@@ -349,6 +357,14 @@ class RuntimeConfig(BaseModel):
     video_cleanup: VideoCleanupConfig
 
 
+def load_default_runtime() -> RuntimeConfig:
+    default_runtime = resources.files("openfeed").joinpath("default_runtime.yaml")
+    parsed = yaml.safe_load(default_runtime.read_text(encoding="utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError(f"default runtime config must be a mapping: {default_runtime}")
+    return RuntimeConfig.model_validate(parsed)
+
+
 def load_runtime(workdir: Path) -> RuntimeConfig:
     del workdir
     raw = load_openfeed_config()
@@ -358,8 +374,4 @@ def load_runtime(workdir: Path) -> RuntimeConfig:
             f"Remove the top-level 'runtime' section from {config_path()}; "
             "OpenFeed uses source-code runtime defaults."
         )
-    default_runtime = resources.files("openfeed").joinpath("default_runtime.yaml")
-    parsed = yaml.safe_load(default_runtime.read_text(encoding="utf-8"))
-    if not isinstance(parsed, dict):
-        raise ValueError(f"default runtime config must be a mapping: {default_runtime}")
-    return RuntimeConfig.model_validate(parsed)
+    return load_default_runtime()

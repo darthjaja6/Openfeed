@@ -15,6 +15,7 @@ from openfeed.clients.consumer.ticlawk import TiclawkConsumerConfig
 from openfeed.clients.llm import GeminiRunner
 from openfeed.models.interests import InterestsConfig, load_interests
 from openfeed.models.runtime import load_runtime
+from openfeed.opencli_service import client as opencli_service
 from openfeed.utils.config_files import load_env, load_openfeed_config
 
 
@@ -102,7 +103,7 @@ def _missing_tool_detail(command: str, reason: str) -> str:
     if command == "opencli":
         return (
             f"missing; needed for {reason}. "
-            "Fix: run `npm install -g @jackwener/opencli`, then `opencli doctor`."
+            "Fix: run `npm install -g @jackwener/opencli`, then start `openfeed opencli-service`."
         )
     if command == "yt-dlp":
         return (
@@ -252,16 +253,18 @@ def _check_tools(doctor: Doctor, platforms: set[str], *, network: bool) -> None:
         reason=", ".join(sorted(platforms & {"youtube", "x", "tiktok"})),
     )
     if needs_browser and network and shutil.which("opencli"):
-        ok, detail = _run_probe(["opencli", "doctor"], timeout=45)
-        if ok:
-            doctor.ok("opencli doctor", detail)
-        else:
+        try:
+            health = opencli_service.health()
+        except opencli_service.OpenCLIServiceError as exc:
             doctor.fail(
-                "opencli doctor",
-                "Browser Bridge is not ready. Fix: install or enable the Browser Bridge "
-                "extension in Google Chrome, keep Chrome open, log in to enabled platforms, "
-                f"then rerun `opencli doctor`.\n{detail}",
+                "opencli service",
+                "OpenCLI service is not reachable. Start it with `openfeed opencli-service` "
+                f"or use `openfeed start`.\n{exc}",
             )
+        else:
+            version = health.get("opencli_version") or "unknown"
+            jobs = health.get("jobs") or {}
+            doctor.ok("opencli service", f"opencli={version} jobs={jobs}")
 
 
 def run_doctor(config_path: Path, workdir: Path, *, network: bool) -> Doctor:
@@ -324,7 +327,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-network",
         action="store_true",
-        help="skip consumer metrics and opencli doctor probes",
+        help="skip consumer metrics and opencli service probes",
     )
     return parser
 
