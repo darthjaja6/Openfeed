@@ -1,6 +1,6 @@
 # htsgen — Internalizing physical constraints into crystal diffusion models
 
-Research code for the plan in [`docs/research/hts-internalization-research-plan.md`](../../docs/research/hts-internalization-research-plan.md).
+Research code for the plan in [`docs/hts-internalization-research-plan.md`](docs/hts-internalization-research-plan.md).
 Goal: measure and raise the **raw-sample compliance rate** (unguided, unfiltered
 samples passing physical constraints) of crystal generative models, with BCS
 superconductor discovery as the demonstration.

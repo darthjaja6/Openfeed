@@ -9,9 +9,9 @@ are physically valid. Headline metric: **raw-sample compliance rate**. Discovery
 demo: DFPT-validated ambient-pressure BCS superconductor candidates.
 
 Read first:
-- `../../docs/research/hts-internalization-research-plan.md` — the finalized plan
+- `docs/hts-internalization-research-plan.md` — the finalized plan
   (internalization ladder, phases, budget, paper title/abstract drafts)
-- `../../docs/research/hts-generative-discovery-survey-and-plan.md` — literature survey
+- `docs/hts-generative-discovery-survey-and-plan.md` — literature survey
 - `README.md` here — code layout + verification status
 
 ## Current state (2026-06)
