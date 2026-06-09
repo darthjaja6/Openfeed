@@ -1,0 +1,35 @@
+[project]
+name = "htsgen"
+version = "0.1.0"
+description = "Internalizing physical constraints into crystal diffusion models — superconductor discovery research code"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pymatgen>=2024.1.1",
+    "smact>=2.5",
+    "spglib>=2.0",
+    "ase>=3.22",
+    "scikit-learn>=1.3",
+    "pandas",
+    "requests",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+# Machine-learned interatomic potential for relaxation / E_hull / phonon gate.
+mlip = ["mace-torch>=0.3.6", "torch"]
+# Phonon checks beyond the Gamma-point gate.
+phonons = ["phonopy>=2.20"]
+# JARVIS superconductor dataset download.
+data = ["jarvis-tools>=2024.1.1", "matminer ; python_version < '3.13'"]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
