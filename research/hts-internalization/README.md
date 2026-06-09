@@ -72,8 +72,11 @@ on/off is the tier-3 ceiling ablation.
 
 - **Tested here (CPU CI)**: tier-1 oracle, compliance tables, reward logic +
   OOD gating, Tc ensemble train/save/load, package install. `pytest -q` → 8 pass.
-- **Written but needs a GPU/network box to exercise**: MACE relax + hull
-  (`stability.py`), phonon gates, dataset downloads, MatterGen wrappers.
+- **Tested with real physics (CPU)**: `stability.py` MACE-MP-0 relax of MgB₂
+  → a=3.077 Å, c=3.525 Å (exp. 3.086/3.524); `phonons.py` Γ-gate correctly
+  reports MgB₂ dynamically stable (min optical mode +30 meV).
+- **Written but needs a network/GPU box to exercise**: hull snapshot +
+  E_hull (needs MP API key), dataset downloads, MatterGen wrappers.
 - **Pinned-by-hand (check on first pod run)**: the two MatterGen CLI calls in
   `run_phase1.sh` (`csv_to_dataset.py`, `mattergen-finetune` flags) and the
   RunPod REST field names in `launch.py` (`--dry-run` first). Both are
