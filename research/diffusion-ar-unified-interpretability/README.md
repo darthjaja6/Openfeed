@@ -24,10 +24,13 @@
 
 ## 状态
 
-- [x] 立项 / goal 定稿
+- [x] 立项 / goal 定稿(`GOAL.md` 电梯版,`01-goal.md` 详细版)
 - [x] 第一步 harness:对齐协议 + 指标 + RQ1/cheap-RQ2(toy 已跑通,见 `code/`)
-- [ ] 在 RunPod 上接真实模型对(先 same-source Dream,再 independent LLaDA)
-- [ ] RQ2:机制层面换基对齐(crosscoder / SAE 分解,核心)
-- [ ] RQ3:可学基 + 直度正则(邪修加速)
+- [x] 自动判定模块(`code/analyze.py`):结果 JSON → STRONG_LINEAR / PARTIAL_NONLINEAR / FALSIFIED
+- [x] RQ3 机制 toy 验证(`code/rq3_toy.py`):coupling +35.9%、可学基再 +6.3% 让 ODE 场变直
+- [x] 真实模型驱动(`code/pod_experiment.py`)+ RunPod 编排(`code/runpod_run.py`,dry-run)就绪
+- [ ] **在 RunPod 上实跑** same-source Dream 对 → 得到第一个真实判定(需算力开销 + HF token)
+- [ ] RQ2 完整版:crosscoder / SAE 分解共享内核 vs 模型特有
+- [ ] RQ3 完整版:真实 latent 上的可学基 + 直度联合优化
 
 代码见 `code/`(`python test_pipeline.py` 本地即可验证管线)。
