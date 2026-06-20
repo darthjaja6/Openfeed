@@ -1,0 +1,8 @@
+# Planning / metrics only (CPU):
+numpy>=1.24
+
+# Real-model runs on RunPod GPU (uncomment on the pod):
+# torch>=2.2
+# transformers>=4.44
+# accelerate>=0.33
+# python-dotenv>=1.0   # to load RUNPOD_API_KEY / HF_TOKEN from .env

@@ -25,6 +25,9 @@
 ## 状态
 
 - [x] 立项 / goal 定稿
-- [ ] RQ1:分布层面功能对齐
-- [ ] RQ2:机制层面换基对齐(核心)
+- [x] 第一步 harness:对齐协议 + 指标 + RQ1/cheap-RQ2(toy 已跑通,见 `code/`)
+- [ ] 在 RunPod 上接真实模型对(先 same-source Dream,再 independent LLaDA)
+- [ ] RQ2:机制层面换基对齐(crosscoder / SAE 分解,核心)
 - [ ] RQ3:可学基 + 直度正则(邪修加速)
+
+代码见 `code/`(`python test_pipeline.py` 本地即可验证管线)。
